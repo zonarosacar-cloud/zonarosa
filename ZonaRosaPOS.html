@@ -340,7 +340,13 @@ input[type=number]::-webkit-inner-spin-button{opacity:.5}
 .price-edit-wrap{display:flex;align-items:center;gap:4px;margin-top:3px}
 .price-edit-inp{background:rgba(255,45,120,.1);border:1px solid var(--pk);border-radius:7px;color:var(--tx);font-family:'Rajdhani',sans-serif;font-size:14px;font-weight:700;width:90px;padding:3px 7px;text-align:right}
 .price-edit-btn{background:rgba(255,45,120,.15);border:1px solid rgba(255,45,120,.3);border-radius:6px;color:var(--pk);cursor:pointer;font-size:11px;padding:3px 6px;transition:all .15s}
-.price-edit-btn:hover{background:rgba(255,45,120,.3)}
+.prod-list-item{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;border:1px solid var(--bd);background:var(--sf);cursor:pointer;transition:all .15s;margin-bottom:5px}
+.prod-list-item:hover{border-color:var(--or);background:var(--or2)}
+.prod-list-name{flex:1;font-size:14px;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prod-list-cat{font-size:10px;color:var(--mu);margin-top:1px}
+.prod-list-price{font-family:'Rajdhani',sans-serif;font-size:16px;font-weight:700;color:var(--or);white-space:nowrap}
+.prod-list-stock{font-size:11px;padding:2px 7px;border-radius:10px;white-space:nowrap}
+
 .orig-price{text-decoration:line-through;color:var(--mu);font-size:11px;margin-right:3px}
 .disco-badge{background:rgba(255,214,0,.15);border:1px solid rgba(255,214,0,.3);border-radius:5px;color:var(--yw);font-size:10px;font-weight:700;padding:1px 5px;margin-left:3px}
 /* ── IMPRESIÓN TÉRMICA 80mm ── */
@@ -475,7 +481,7 @@ const G={
   products:ls(K.prods,DPRODS),movements:ls(K.movs,[]),purchases:ls(K.purch,[]),
   queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<2*3600000)),
   cart:[],cartCustomer:null,cartPlate:'',cartVehicleType:'sedan',editingPriceKey:null,editingPriceVal:'',
-  search:'',svcCat:'all',posTab:'services',
+  search:'',svcCat:'all',posTab:'services',prodListView:false,
   payModal:false,payMethod:'cash',cashGiven:'',successTx:null,lastInvoice:null,
   modal:null,editItem:null,
   fp:{cat:'🚿 Lavados',emoji:'✨',name:'',desc:'',price:'',pm:null,active:true},
@@ -718,9 +724,24 @@ function startQueueTimer(){
 // ══════════════════════════════════════════════════════
 function render(){
   const root=document.getElementById('root');
+  // Guardar estado del input activo antes de re-renderizar
+  const activeEl=document.activeElement;
+  const activeId=activeEl&&activeEl.id?activeEl.id:null;
+  const activeVal=activeEl&&activeEl.value?activeEl.value:'';
+  const activeSel=activeEl&&activeEl.selectionStart!=null?activeEl.selectionStart:null;
+
   if(!G.currentUser){root.innerHTML=renderLogin();bindLogin();startClock();return;}
   root.innerHTML=`<div class="app">${renderSidebar()}<div class="main">${renderPage()}</div></div>${renderModal()}`;
   bindMain();startClock();startQueueTimer();
+
+  // Restaurar foco al mismo input después del re-render
+  if(activeId){
+    const restored=document.getElementById(activeId);
+    if(restored&&(restored.tagName==='INPUT'||restored.tagName==='TEXTAREA')){
+      restored.focus();
+      if(activeSel!=null){try{restored.setSelectionRange(activeSel,activeSel);}catch(e){}}
+    }
+  }
 }
 
 // ── LOGIN ──
@@ -987,11 +1008,14 @@ function pgPOS(){
         <button class="pos-tab prod-tab ${isP?'active':''}" data-postab="products">📦 Productos (venta directa)</button>
       </div>
       ${!isP?`<div class="vt-bar">${Object.entries(VT).map(([k,v])=>`<button class="vtb ${G.cartVehicleType===k?'active':''}" data-vt="${k}">${v}</button>`).join('')}</div>`:''}
-      <input class="si" id="pos-search" placeholder="🔍 Buscar..." value="${esc(G.search)}" autocomplete="off">
-      <div class="cat-bar">
-        ${(isP?allProdCats:allSvcCats).map(c=>`<button class="psb ${isP?'yw':''} ${G.svcCat===c?'active':''}" data-cat="${esc(c)}">${c==='all'?'🔷 Todos':c}</button>`).join('')}
+      <div style="display:flex;gap:7px;align-items:center">
+        <input class="si" id="pos-search" placeholder="🔍 Buscar..." value="${esc(G.search)}" autocomplete="off" style="flex:1">
+        ${isP?`<button class="btn ${G.prodListView?'or':''}" id="toggle-prod-view" title="${G.prodListView?'Vista cuadrícula':'Vista lista'}" style="padding:8px 11px;flex-shrink:0">${G.prodListView?'⊞':'☰'}</button>`:''}
       </div>
-      <div class="pg">
+      ${!G.prodListView||!isP?`<div class="cat-bar">
+        ${(isP?allProdCats:allSvcCats).map(c=>`<button class="psb ${isP?'yw':''} ${G.svcCat===c?'active':''}" data-cat="${esc(c)}">${c==='all'?'🔷 Todos':c}</button>`).join('')}
+      </div>`:''}
+      <div class="${G.prodListView&&isP?'':'pg'}">
         ${!isP
           ?(filSvc.length===0?`<div class="empty-state" style="grid-column:1/-1"><div class="es-icon">🔍</div><p>Sin servicios</p></div>`
           :filSvc.map(s=>{const pr=getSvcPrice(s,G.cartVehicleType);const cc=SCAT_CLR[s.cat]||'pk';return`<div class="pc" data-add="${esc(s.id)}">
@@ -1001,14 +1025,28 @@ function pgPOS(){
             ${s.desc?`<div style="font-size:9px;color:var(--mu)">${esc(s.desc)}</div>`:''}
             <div class="pp" style="color:var(--${cc})">${pr>0?fmt(pr):'A convenir'}</div>
           </div>`;}).join(''))
-          :(filProd.length===0?`<div class="empty-state" style="grid-column:1/-1"><div class="es-icon">📦</div><p>Sin productos con precio de venta activos</p><p style="font-size:11px;margin-top:5px">Configurá el precio de venta en Inventario</p></div>`
-          :filProd.map(p=>{const st=stockSt(p);const cc=PCAT_CLR[p.cat]||'or';return`<div class="pc prod-card" data-addp="${esc(p.id)}">
-            <div class="pe">${esc(p.emoji)}</div>
-            <div class="pc-cat" style="color:var(--${cc})">${esc(p.cat)}</div>
-            <div class="pn">${esc(p.name)}</div>
-            <div class="pp" style="color:var(--or)">${fmt(p.salePrice)}</div>
-            <div><span class="stock-pill ${st==='rd'?'low':st==='yw'?'med':''}">${p.stock} ${esc(p.unit)}</span></div>
-          </div>`;}).join(''))}
+          :filProd.length===0
+            ?`<div class="empty-state" ${G.prodListView?'':'style="grid-column:1/-1"'}><div class="es-icon">📦</div><p>${q?'Sin coincidencias para "'+esc(q)+'"':'Sin productos con precio de venta'}</p></div>`
+            :G.prodListView
+              // ── VISTA LISTA ──
+              ?`<div style="padding:2px 0">${filProd.map(p=>{const st=stockSt(p);const cc=PCAT_CLR[p.cat]||'or';return`<div class="prod-list-item" data-addp="${esc(p.id)}" data-name="${esc(p.name.toLowerCase())}" data-cat="${esc(p.cat.toLowerCase())}">
+                  <span style="font-size:18px;flex-shrink:0">${esc(p.emoji)}</span>
+                  <div style="flex:1;min-width:0">
+                    <div class="prod-list-name">${esc(p.name)}</div>
+                    <div class="prod-list-cat" style="color:var(--${cc})">${esc(p.cat)}</div>
+                  </div>
+                  <span class="stock-pill prod-list-stock ${st==='rd'?'low':st==='yw'?'med':''}">${p.stock} ${esc(p.unit)}</span>
+                  <span class="prod-list-price">${fmt(p.salePrice)}</span>
+                </div>`;}).join('')}</div>`
+              // ── VISTA CUADRÍCULA ──
+              :`${filProd.map(p=>{const st=stockSt(p);const cc=PCAT_CLR[p.cat]||'or';return`<div class="pc prod-card" data-addp="${esc(p.id)}" data-name="${esc(p.name.toLowerCase())}" data-cat="${esc(p.cat.toLowerCase())}">
+                  <div class="pe">${esc(p.emoji)}</div>
+                  <div class="pc-cat" style="color:var(--${cc})">${esc(p.cat)}</div>
+                  <div class="pn">${esc(p.name)}</div>
+                  <div class="pp" style="color:var(--or)">${fmt(p.salePrice)}</div>
+                  <div><span class="stock-pill ${st==='rd'?'low':st==='yw'?'med':''}">${p.stock} ${esc(p.unit)}</span></div>
+                </div>`;}).join('')}`
+        }
       </div>
     </div>
     <div class="pos-r">
@@ -1104,7 +1142,7 @@ function pgInventory(){
 
     ${G.invTab==='products'?`
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input class="si" style="flex:1;min-width:180px" id="inv-search" placeholder="🔍 Buscar producto..." value="${esc(G.search)}">
+        <input class="si" style="flex:1;min-width:180px" id="prod-search" placeholder="🔍 Buscar producto..." value="${esc(G.search)}">
         <div class="cat-bar">
           ${['all',...cats].map(c=>`<button class="psb yw ${G.invCat===c?'active':''}" data-invcatf="${esc(c)}">${c==='all'?'🔷 Todos':c}</button>`).join('')}
         </div>
@@ -1856,6 +1894,7 @@ function renderProdModal(){
         <div class="ff"><label class="fl">Stock Actual</label><input class="fi" type="number" id="fp2-stock" value="${esc(f.stock)}" placeholder="0"></div>
         <div class="ff"><label class="fl">Stock Mínimo (alerta)</label><input class="fi" type="number" id="fp2-min" value="${esc(f.minStock)}" placeholder="0"></div>
         <div class="ff full"><label class="fl">Proveedor</label><input class="fi" id="fp2-sup" value="${esc(f.supplier)}" placeholder="Ej: Distribuidora PEAK"></div>
+        <div class="ff full"><label class="fl">🔲 Código de Barras</label><input class="fi" id="fp2-barcode" value="${esc(f.barcode||'')}" placeholder="Escanear o escribir código..."></div>
       </div>
       <div class="info-yw" style="margin-top:10px">💡 Si el precio de venta es 0, el producto no aparecerá en la pestaña de Productos del POS.</div>
       <div class="ma">
@@ -2392,7 +2431,8 @@ function saveProd(){
     salePrice:parseFloat((document.getElementById('fp2-sale')&&document.getElementById('fp2-sale').value))||0,
     stock:stockVal,
     minStock:parseFloat((document.getElementById('fp2-min')&&document.getElementById('fp2-min').value))||0,
-    supplier:(document.getElementById('fp2-sup')&&document.getElementById('fp2-sup').value).trim()||'',
+    supplier:(document.getElementById('fp2-sup')&&document.getElementById('fp2-sup').value)||'',
+    barcode:(document.getElementById('fp2-barcode')&&document.getElementById('fp2-barcode').value.trim())||'',
     active:true,
   };
   if(G.editItem){
@@ -2801,6 +2841,15 @@ function bindMain(){
   // POS
   document.querySelectorAll('[data-vt]').forEach(el=>el.onclick=()=>{G.cartVehicleType=el.dataset.vt;render();});
   document.querySelectorAll('[data-postab]').forEach(el=>el.onclick=()=>{G.posTab=el.dataset.postab;G.svcCat='all';G.search='';render();});
+  document.getElementById('toggle-prod-view')&&document.getElementById('toggle-prod-view').addEventListener('click',function(){
+    G.prodListView=!G.prodListView;G.search='';render();
+  });
+  // POS search — render() restaura el foco automáticamente
+  const posSearchEl=document.getElementById('pos-search');
+  if(posSearchEl){
+    posSearchEl.addEventListener('input',function(){G.search=this.value;render();});
+    posSearchEl.addEventListener('keydown',function(e){e.stopPropagation();});
+  }
   document.querySelectorAll('[data-cat]').forEach(el=>el.onclick=()=>{G.svcCat=el.dataset.cat;render();});
   document.querySelectorAll('[data-add]').forEach(el=>el.onclick=()=>addToCart(el.dataset.add));
   document.querySelectorAll('[data-addp]').forEach(el=>el.onclick=()=>addProdToCart(el.dataset.addp));
@@ -2832,7 +2881,7 @@ function bindMain(){
   document.querySelectorAll('[data-dp]').forEach(el=>el.onclick=()=>{G.products=G.products.map(p=>p.id===el.dataset.dp?{...p,active:!p.active}:p);save('prods');render();});
   document.querySelectorAll('[data-invtab]').forEach(el=>el.onclick=()=>{G.invTab=el.dataset.invtab;render();});
   document.querySelectorAll('[data-invcatf]').forEach(el=>el.onclick=()=>{G.invCat=el.dataset.invcatf;render();});
-  const is=document.getElementById('inv-search');if(is)is.oninput=e=>{G.search=e.target.value;render();};
+  const is=document.getElementById('prod-search');if(is)is.oninput=e=>{G.search=e.target.value;render();};
 
   // Modales de guardado inventario
   document.getElementById('save-prod')&&document.getElementById('save-prod').addEventListener('click',saveProd);
