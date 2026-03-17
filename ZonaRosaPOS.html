@@ -465,13 +465,13 @@ const DSVC=[
   {id:'mc3',cat:'⚙️ Mecánica',emoji:'🔋',name:'Cambio Batería',desc:'Mano de obra',price:3000,active:true},
 ];
 
-const DSET={businessName:'Zona Rosa',tagline:'Lavacar · Lubricentro · Mecánica Rápida',sinpeNumber:'6121-3300',sinpeName:'Zona Rosa Lavacar',logo:null,iva:false,ivaRate:13,email:'zonarosa@email.com',address:'San José, Costa Rica',phone:'6121-3300',receiptFooter:'¡Gracias por preferirnos! 🌸',invoicePrefix:'ZR',emailjsServiceId:'',emailjsTemplateId:'',emailjsPublicKey:'',emailCC:'',driveClientId:'',driveAutoBackup:false};
+const DSET={businessName:'Zona Rosa',tagline:'Lavacar · Lubricentro · Mecánica Rápida',sinpeNumber:'6121-3300',sinpeName:'Zona Rosa Lavacar',logo:null,iva:false,ivaRate:13,email:'zonarosacar@gmail.com',address:'San José, Costa Rica',phone:'6121-3300',receiptFooter:'¡Gracias por preferirnos! 🌸',invoicePrefix:'ZR',emailjsServiceId:'service_lzn5vws',emailjsTemplateId:'template_tauw02k',emailjsPublicKey:'YdHKxjiDCFeC9gi0O',emailCC:'zonarosacar@gmail.com',driveClientId:'636309581758-ih5l46c8bh91q9dffs6huh1rdql06uf1.apps.googleusercontent.com',driveAutoBackup:true};
 // ── ESTADO GLOBAL ──
 const G={
   view:'dashboard',loginStep:'select',loginUser:null,loginPin:'',loginErr:false,currentUser:null,
   services:ls(K.svcs,DSVC),transactions:ls(K.tx,[]),expenses:ls(K.exp,[]),
   users:ls(K.users,[{id:'u1',name:'Admin',role:'admin',pin:'1234',emoji:'👑'},{id:'u2',name:'Cajero',role:'cajero',pin:'0000',emoji:'🔑'}]),
-  customers:ls(K.custs,[]),settings:ls(K.set,DSET),invoices:ls(K.invs,[]),
+  customers:ls(K.custs,[]),settings:Object.assign({},DSET,ls(K.set,{})),invoices:ls(K.invs,[]),
   products:ls(K.prods,DPRODS),movements:ls(K.movs,[]),purchases:ls(K.purch,[]),
   queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<2*3600000)),
   cart:[],cartCustomer:null,cartPlate:'',cartVehicleType:'sedan',editingPriceKey:null,editingPriceVal:'',
@@ -684,6 +684,21 @@ function doBackup(){
   b.unshift({timestamp:new Date().toISOString(),transactions:G.transactions,expenses:G.expenses,customers:G.customers,invoices:G.invoices,services:G.services,products:G.products,movements:G.movements,purchases:G.purchases,settings:G.settings,users:G.users});
   ss('zr_baks',b.slice(0,10));
 }
+
+// ── GUARDADO DE EMERGENCIA al cerrar/recargar ──
+window.addEventListener('beforeunload',function(){
+  try{
+    ss(K.tx,G.transactions);
+    ss(K.queue,G.queue);
+    ss(K.custs,G.customers);
+    ss(K.invs,G.invoices);
+    ss(K.exp,G.expenses);
+    ss(K.prods,G.products);
+    ss(K.movs,G.movements);
+    ss(K.purch,G.purchases);
+    ss(K.set,G.settings);
+  }catch(e){}
+});
 
 // ── TIMER PIZARRA ──
 let _qTimer=null;
@@ -2977,6 +2992,30 @@ window.addEventListener('appinstalled',function(){
   showToast('✅ ¡Zona Rosa POS instalado como app!');
   render();
 });
+
+// ── AUTO-INIT EMAILJS ──
+(function(){
+  var s=G.settings;
+  if(s.emailjsPublicKey){
+    var sc=document.createElement('script');
+    sc.src='https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js';
+    sc.onload=function(){window.emailjs.init({publicKey:s.emailjsPublicKey});};
+    document.head.appendChild(sc);
+  }
+})();
+
+// ── AUTO-RECONEXIÓN GOOGLE DRIVE ──
+(function(){
+  var saved=ls('zr_drive_token',null);
+  if(saved&&saved.expires>Date.now()){
+    G.driveToken=saved;
+    G.driveUserEmail=ls('zr_drive_email',null);
+    G.lastDriveBackup=ls('zr_last_drive_bak',null);
+  } else if(saved){
+    // Token expirado - silently clear
+    ss('zr_drive_token',null);
+  }
+})();
 
 // ── ARRANQUE ──
 // Contador de visitas diarias
