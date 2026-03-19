@@ -405,7 +405,7 @@ input[type=number]::-webkit-inner-spin-button{opacity:.5}
 // ══════════════════════════════════════════════════════
 //  ZONA ROSA POS v4.0 — Con Inventario de Productos
 // ══════════════════════════════════════════════════════
-const K={svcs:'zr_svcs',tx:'zr_tx',exp:'zr_exp',users:'zr_users',custs:'zr_custs',set:'zr_set',invs:'zr_invs',queue:'zr_queue',prods:'zr_prods',movs:'zr_movs',purch:'zr_purch'};
+const K={svcs:'zr_svcs',tx:'zr_tx',exp:'zr_exp',users:'zr_users',custs:'zr_custs',set:'zr_set',invs:'zr_invs',queue:'zr_queue',prods:'zr_prods',movs:'zr_movs',purch:'zr_purch',qhist:'zr_qhist'};
 const RP={admin:['dashboard','pos','queue','inventory','clients','invoices','reports','accounting','services','users','backup','settings'],cajero:['pos','queue','inventory','clients','invoices'],contador:['reports','accounting']};
 const ALL_PERMS=[
   {id:'dashboard',label:'🏠 Dashboard',group:'Principal'},
@@ -500,6 +500,7 @@ const G={
   customers:ls(K.custs,[]),settings:Object.assign({},DSET,ls(K.set,{})),invoices:ls(K.invs,[]),
   products:ls(K.prods,DPRODS),movements:ls(K.movs,[]),purchases:ls(K.purch,[]),
   queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<2*3600000)),
+  queueHistory:ls(K.qhist,[]),qHistTab:'hoy',
   cart:[],cartCustomer:null,cartPlate:'',cartVehicleType:'sedan',editingPriceKey:null,editingPriceVal:'',
   search:'',svcCat:'all',posTab:'services',prodListView:false,
   payModal:false,payMethod:'cash',cashGiven:'',successTx:null,lastInvoice:null,
@@ -705,10 +706,20 @@ function addToQueue(plate,vt,name,note,services){
   save('queue');render();
 }
 function advanceQueue(id){
-  G.queue=G.queue.map(q=>{
+  var now=new Date().toISOString();
+  G.queue=G.queue.map(function(q){
     if(q.id!==id)return q;
-    if(q.status==='wait')return{...q,status:'proc',startedAt:new Date().toISOString()};
-    if(q.status==='proc')return{...q,status:'done',doneAt:new Date().toISOString()};
+    if(q.status==='wait')return Object.assign({},q,{status:'proc',startedAt:now});
+    if(q.status==='proc'){
+      var done=Object.assign({},q,{status:'done',doneAt:now});
+      // Save to permanent history
+      var mins=q.startedAt?Math.round((new Date(now)-new Date(q.startedAt))/60000):0;
+      var rec=Object.assign({},done,{realMins:mins,savedAt:now});
+      G.queueHistory.unshift(rec);
+      if(G.queueHistory.length>500)G.queueHistory=G.queueHistory.slice(0,500);
+      ss(K.qhist,G.queueHistory);
+      return done;
+    }
     return q;
   });
   save('queue');render();
@@ -740,6 +751,7 @@ window.addEventListener('beforeunload',function(){
     ss(K.movs,G.movements);
     ss(K.purch,G.purchases);
     ss(K.set,G.settings);
+    ss(K.qhist,G.queueHistory);
   }catch(e){}
 });
 
@@ -1305,6 +1317,38 @@ function pgInventory(){
   </div>`;
 }
 // ── QUEUE ETA HELPERS ──
+function exportQueueHistory(){
+  if(!G.queueHistory.length){showToast('⚠️ No hay historial para exportar.');return;}
+  var rows=[['Fecha','Día','Hora Entrada','Hora Salida','Duración (min)','Placa','Tipo Vehículo','Cliente','Servicios','Nota']];
+  G.queueHistory.forEach(function(h){
+    var entrada=new Date(h.createdAt);
+    var salida=new Date(h.doneAt);
+    var dias=['Domingo','Lunes','Martes','Miércoles','Jueves','Viernes','Sábado'];
+    rows.push([
+      entrada.toLocaleDateString('es-CR'),
+      dias[entrada.getDay()],
+      entrada.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'}),
+      salida.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'}),
+      h.realMins||0,
+      h.plate||'',
+      VT[h.vehicleType]||h.vehicleType||'',
+      h.customerName||'',
+      (h.services||[]).join(', '),
+      h.note||''
+    ]);
+  });
+  var csv=rows.map(function(r){
+    return r.map(function(c){
+      var s=String(c||'');
+      if(s.includes(','))s='"'+s+'"';
+      return s;
+    }).join(',');
+  }).join('\n');
+  var bom='\uFEFF'; // UTF-8 BOM for Excel
+  dlFile('historial-pizarra-'+mk()+'.csv',bom+csv,'text/csv;charset=utf-8');
+  showToast('✅ Historial exportado como CSV. Abrilo con Excel.');
+}
+
 function getEstimatedMins(services){
   // Sum estimated minutes of all services found in the services list
   var total=0;
@@ -1338,31 +1382,102 @@ function pgQueue(){
   const active=G.queue.filter(q=>q.status!=='done');
   const done=G.queue.filter(q=>q.status==='done');
   const stats=getQueueStats();
+  const tab=G.qHistTab||'pizarra';
+
+  // History filtering
+  const now=new Date();
+  const todayStr=now.toDateString();
+  const weekAgo=new Date(now-7*86400000);
+  const filtHist=tab==='hoy'
+    ?G.queueHistory.filter(h=>new Date(h.doneAt).toDateString()===todayStr)
+    :tab==='semana'
+    ?G.queueHistory.filter(h=>new Date(h.doneAt)>=weekAgo)
+    :G.queueHistory;
+
+  const histTotal=filtHist.length;
+  const histAvg=histTotal?Math.round(filtHist.reduce(function(s,h){return s+(h.realMins||0);},0)/histTotal):0;
+
+  if(tab==='pizarra'){
+    return`<div class="page">
+      <div class="ph">
+        <h1>🚗 Pizarra de Servicios</h1>
+        <div style="display:flex;gap:8px">
+          <button class="btn cy" id="add-queue">+ Agregar</button>
+          <button class="btn" id="tab-hist" style="background:var(--sf2)">📋 Historial (${G.queueHistory.length})</button>
+          <button class="btn rd" id="reset-queue">🗑 Resetear</button>
+        </div>
+      </div>
+      <div class="q-stat-bar">
+        <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${stats.waiting}</div><div class="q-stat-lbl">⏳ Esperando</div></div>
+        <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${stats.inProcess}</div><div class="q-stat-lbl">🔧 En Proceso</div></div>
+        <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${stats.completedToday}</div><div class="q-stat-lbl">✅ Completados hoy</div></div>
+        <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${stats.avgMins?stats.avgMins+'m':'—'}</div><div class="q-stat-lbl">⏱ Promedio/servicio</div></div>
+      </div>
+      ${active.length===0&&done.length===0?`<div class="empty-state"><div class="es-icon">🚗</div><p>Sin vehículos en la pizarra.</p><p style="font-size:11px;margin-top:6px">Agregá uno con el botón de arriba.</p></div>`:''}
+      ${active.length>0?`
+        <div>
+          <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Activos (${active.length})</div>
+          <div class="queue-grid">${active.map(renderQCard).join('')}</div>
+        </div>`:'' }
+      ${done.length>0?`
+        <div>
+          <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Completados Recientes</div>
+          <div class="queue-grid">${done.map(renderQCard).join('')}</div>
+        </div>`:'' }
+    </div>`;
+  }
+
+  // HISTORIAL VIEW
   return`<div class="page">
     <div class="ph">
-      <h1>🚗 Pizarra de Servicios</h1>
-      <div style="display:flex;gap:8px">
-        <button class="btn cy" id="add-queue">+ Agregar</button>
-        <button class="btn rd" id="reset-queue">🗑 Resetear</button>
+      <h1>📋 Historial de Pizarra</h1>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn cy" id="tab-pizarra">← Pizarra</button>
+        <button class="btn" id="export-qhist" style="background:var(--sf2)">⬇ Exportar Excel</button>
       </div>
     </div>
-    <div class="q-stat-bar">
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${stats.waiting}</div><div class="q-stat-lbl">⏳ Esperando</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${stats.inProcess}</div><div class="q-stat-lbl">🔧 En Proceso</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${stats.completedToday}</div><div class="q-stat-lbl">✅ Completados hoy</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${stats.avgMins?stats.avgMins+'m':'—'}</div><div class="q-stat-lbl">⏱ Promedio/servicio</div></div>
+    <!-- Filtros -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      ${[['hoy','Hoy'],['semana','Esta semana'],['todo','Todo']].map(([k,l])=>
+        `<button class="psb ${tab===k?'active':''}" data-qht="${k}">${l}</button>`).join('')}
     </div>
-    ${active.length===0&&done.length===0?`<div class="empty-state"><div class="es-icon">🚗</div><p>Sin vehículos en la pizarra.</p><p style="font-size:11px;margin-top:6px">Agregá uno con el botón de arriba.</p></div>`:''}
-    ${active.length>0?`
-      <div>
-        <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Activos (${active.length})</div>
-        <div class="queue-grid">${active.map(renderQCard).join('')}</div>
-      </div>`:'' }
-    ${done.length>0?`
-      <div>
-        <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Completados Recientes</div>
-        <div class="queue-grid">${done.map(renderQCard).join('')}</div>
-      </div>`:'' }
+    <!-- Stats del historial -->
+    <div class="q-stat-bar" style="margin-bottom:16px">
+      <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${histTotal}</div><div class="q-stat-lbl">🚗 Vehículos</div></div>
+      <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${histAvg?histAvg+'m':'—'}</div><div class="q-stat-lbl">⏱ Tiempo promedio</div></div>
+      <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${[...new Set(filtHist.map(h=>h.plate).filter(Boolean))].length}</div><div class="q-stat-lbl">🏷 Placas únicas</div></div>
+      <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${[...new Set(filtHist.map(h=>new Date(h.doneAt).toDateString()))].length}</div><div class="q-stat-lbl">📅 Días con servicio</div></div>
+    </div>
+    <!-- Tabla historial -->
+    ${filtHist.length===0
+      ?`<div class="empty-state"><div class="es-icon">📋</div><p>Sin registros en este período.</p></div>`
+      :`<div class="scard" style="padding:0;overflow:hidden">
+        <table>
+          <thead><tr>
+            <th>Fecha</th><th>Hora entrada</th><th>Hora salida</th><th>Duración</th>
+            <th>Placa</th><th>Vehículo</th><th>Cliente</th><th>Servicios</th><th>Nota</th>
+          </tr></thead>
+          <tbody>
+            ${filtHist.map(h=>{
+              const entrada=new Date(h.createdAt);
+              const salida=new Date(h.doneAt);
+              const mins=h.realMins||0;
+              const dur=mins>=60?(Math.floor(mins/60)+'h '+(mins%60)+'m'):(mins+'m');
+              return`<tr>
+                <td style="font-size:12px;white-space:nowrap">${entrada.toLocaleDateString('es-CR')}</td>
+                <td style="font-size:12px;white-space:nowrap">${entrada.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'})}</td>
+                <td style="font-size:12px;white-space:nowrap">${salida.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'})}</td>
+                <td style="font-family:'Rajdhani',sans-serif;font-weight:700;color:var(--cy);font-size:14px">${h.startedAt?dur:'—'}</td>
+                <td>${h.plate?`<span class="plate" style="font-size:11px">${esc(h.plate)}</span>`:'—'}</td>
+                <td style="font-size:12px">${VT[h.vehicleType]||h.vehicleType||'—'}</td>
+                <td style="font-size:12px">${esc(h.customerName||'—')}</td>
+                <td style="font-size:11px;color:var(--mu)">${(h.services||[]).join(', ')||'—'}</td>
+                <td style="font-size:11px;color:var(--mu);font-style:italic">${esc(h.note||'')}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`}
   </div>`;
 }
 
@@ -2805,7 +2920,8 @@ function sheetsGetOrCreate(cb){
         {properties:{title:'👥 Clientes',sheetId:1}},
         {properties:{title:'📦 Inventario',sheetId:2}},
         {properties:{title:'🚗 Pizarra',sheetId:3}},
-        {properties:{title:'📈 Resumen',sheetId:4}}
+        {properties:{title:'📋 Historial',sheetId:4}},
+        {properties:{title:'📈 Resumen',sheetId:5}}
       ]
     })
   })
@@ -2950,11 +3066,32 @@ function buildSheetsData(){
     ['Completados hoy',G.queue.filter(function(q){return q.status==='done';}).length],
   ];
 
+  // ── Historial Pizarra ──
+  var histRows=[['Fecha','Día','Hora Entrada','Hora Salida','Duración (min)','Placa','Tipo Vehículo','Cliente','Servicios','Nota']];
+  var dias=['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+  G.queueHistory.forEach(function(h){
+    var entrada=new Date(h.createdAt);
+    var salida=new Date(h.doneAt);
+    histRows.push([
+      entrada.toLocaleDateString('es-CR'),
+      dias[entrada.getDay()],
+      entrada.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'}),
+      salida.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'}),
+      h.realMins||0,
+      h.plate||'',
+      VT[h.vehicleType]||h.vehicleType||'',
+      h.customerName||'',
+      (h.services||[]).join(', '),
+      h.note||''
+    ]);
+  });
+
   return[
     {range:"'📊 Ventas'!A1",values:txRows},
     {range:"'👥 Clientes'!A1",values:custRows},
     {range:"'📦 Inventario'!A1",values:prodRows},
     {range:"'🚗 Pizarra'!A1",values:qRows},
+    {range:"'📋 Historial'!A1",values:histRows},
     {range:"'📈 Resumen'!A1",values:resRows},
   ];
 }
@@ -3304,6 +3441,10 @@ function bindMain(){
   document.getElementById('add-queue')&&document.getElementById('add-queue').addEventListener('click',()=>{G.modal='queue';render();});
   document.getElementById('reset-queue')&&document.getElementById('reset-queue').addEventListener('click',()=>{G.queue=[];save('queue');render();showToast('🗑 Pizarra reseteada.');});
   document.querySelectorAll('[data-adv]').forEach(el=>el.onclick=e=>{e.stopPropagation();advanceQueue(el.dataset.adv);});
+  document.getElementById('tab-hist')&&document.getElementById('tab-hist').addEventListener('click',function(){G.qHistTab='hoy';render();});
+  document.getElementById('tab-pizarra')&&document.getElementById('tab-pizarra').addEventListener('click',function(){G.qHistTab='pizarra';render();});
+  document.getElementById('export-qhist')&&document.getElementById('export-qhist').addEventListener('click',function(){exportQueueHistory();});
+  document.querySelectorAll('[data-qht]').forEach(function(el){el.onclick=function(){G.qHistTab=el.dataset.qht;render();};});
   document.querySelectorAll('[data-rmq]').forEach(el=>el.onclick=e=>{e.stopPropagation();removeQueue(el.dataset.rmq);});
   document.getElementById('save-queue')&&document.getElementById('save-queue').addEventListener('click',saveQueueItem);
 
