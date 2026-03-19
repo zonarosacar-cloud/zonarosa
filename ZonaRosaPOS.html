@@ -733,6 +733,13 @@ setInterval(function(){
     driveUploadBackup(true);
   }
 },30*60*1000);
+
+// ── AUTO-SYNC GOOGLE SHEETS cada 10 min ──
+setInterval(function(){
+  if(G.driveToken&&G.driveToken.expires>Date.now()&&G.sheetsId){
+    syncToSheets();
+  }
+},10*60*1000);
 function doBackup(){
   const b=ls('zr_baks',[]);
   b.unshift({timestamp:new Date().toISOString(),transactions:G.transactions,expenses:G.expenses,customers:G.customers,invoices:G.invoices,services:G.services,products:G.products,movements:G.movements,purchases:G.purchases,settings:G.settings,users:G.users});
@@ -1891,6 +1898,7 @@ function pgBackup(){
     +'<div class="scard" style="border-color:rgba(32,196,88,.2)">'
     +'<div class="stit" style="color:var(--gn)">📊 Google Sheets — Panel Remoto '+(G.sheetsId?'<span class="bdg bok">● Activo</span>':'<span class="bdg byw">● Sin configurar</span>')+'</div>'
     +'<div style="font-size:13px;color:var(--mu);margin-bottom:12px">Sincronizá los datos del negocio a un Google Sheet. Podés verlos desde cualquier PC o celular en tiempo real: ventas, clientes, inventario, pizarra y resumen del día.</div>'
+    +(G.sheetsId?'<div class="info-box" style="margin-bottom:10px">🤖 Auto-sync activo — se sincroniza automáticamente cada 10 min cuando Drive está conectado.</div>':'')
     +(G.lastSheetsSync?'<div style="font-size:12px;color:var(--mu);margin-bottom:10px">🕓 Última sincronización: '+fmtDT(G.lastSheetsSync)+'</div>':'')
     +'<div style="display:flex;gap:8px;flex-wrap:wrap">'
     +(driveOk
@@ -1899,7 +1907,6 @@ function pgBackup(){
       :'<div class="info-box" style="width:100%">⚠️ Conectá Google Drive primero para usar esta función.</div>'
     )
     +'</div>'
-    +(G.sheetsId?'<div class="info-box" style="margin-top:10px;font-size:12px">💡 El Sheet se actualiza solo cuando presionás "Sincronizar". Compartí el link con quien necesite ver los datos.</div>':'')
     +'</div>'
     +'<div class="scard">'
     +'<div class="stit">💻 Respaldo Local</div>'
