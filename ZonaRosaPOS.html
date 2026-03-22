@@ -1660,35 +1660,45 @@ function pgClients(){
 }
 
 function pgInvoices(){
-  const fil=G.invoices.filter(i=>!G.invSearch||(i.invNum+i.customerName+(i.plate||'')).toLowerCase().includes(G.invSearch.toLowerCase()));
-  return`<div class="page">
-    <div class="ph">
-      <h1>📄 Facturas</h1>
-      <span class="bdg byw">${G.invoices.filter(i=>i.customerEmail&&!i.sent).length} pendientes de envío</span>
-    </div>
-    <input class="si" id="inv-search" placeholder="🔍 Buscar por número, cliente, placa..." value="${esc(G.invSearch)}">
-    <table>
-      <thead><tr><th>N° Factura</th><th>Fecha</th><th>Cliente</th><th>Placa</th><th>Total</th><th>Pago</th><th>Email</th><th></th></tr></thead>
-      <tbody>
-        ${fil.length===0?`<tr><td colspan="8" style="text-align:center;padding:28px;color:var(--mu)">Sin facturas</td></tr>`
-        :fil.slice(0,80).map(inv=>`<tr>
-          <td style="font-family:'Rajdhani',sans-serif;font-weight:700;color:var(--pk)">${esc(inv.invNum)}</td>
-          <td style="font-size:11px;color:var(--mu)">${fmtDT(inv.date)}</td>
-          <td>${esc(inv.customerName||'—')}</td>
-          <td>${inv.plate?`<span class="plate">${esc(inv.plate)}</span>`:'—'}</td>
-          <td style="font-family:'Rajdhani',sans-serif;font-weight:700;color:var(--gn)">${fmt(inv.total)}</td>
-          <td><span class="bdg bcy">${ML[inv.method]||inv.method}</span></td>
-          <td>${inv.customerEmail?inv.sent?`<span class="bdg bok">✅ Enviada</span>`:`<span class="bdg byw">⏳ Pendiente</span>`:`<span class="bdg bmu">—</span>`}</td>
-          <td>
-            <div style="display:flex;gap:3px">
-              <button class="icon-btn" data-vi="${esc(inv.id)}" title="Ver">👁️</button>
-              ${inv.customerEmail&&!inv.sent?`<button class="icon-btn" data-ei="${esc(inv.id)}" style="color:var(--cy)" title="Enviar email">📧</button>`:''}
-            </div>
-          </td>
-        </tr>`).join('')}
-      </tbody>
-    </table>
-  </div>`;
+  var fil=G.invoices.filter(function(i){
+    if(!G.invSearch)return true;
+    var q=G.invSearch.toLowerCase();
+    return((i.invNum||'')+(i.customerName||'')+(i.plate||'')).toLowerCase().indexOf(q)>=0;
+  });
+  var rows='';
+  fil.slice(0,100).forEach(function(inv){
+    try{
+      var emailBadge=inv.customerEmail
+        ?(inv.sent?'<span class="bdg bok">✅ Enviada</span>':'<span class="bdg byw">⏳ Pendiente</span>')
+        :'<span class="bdg bmu">—</span>';
+      rows+='<tr>'
+        +'<td style="font-family:\'Rajdhani\',sans-serif;font-weight:700;color:var(--pk)">'+esc(inv.invNum||'—')+'</td>'
+        +'<td style="font-size:11px;color:var(--mu)">'+fmtDT(inv.date||new Date().toISOString())+'</td>'
+        +'<td>'+esc(inv.customerName||'—')+'</td>'
+        +'<td>'+(inv.plate?'<span class="plate">'+esc(inv.plate)+'</span>':'—')+'</td>'
+        +'<td style="font-family:\'Rajdhani\',sans-serif;font-weight:700;color:var(--gn)">'+fmt(inv.total||0)+'</td>'
+        +'<td><span class="bdg bcy">'+(ML[inv.method]||inv.method||'—')+'</span></td>'
+        +'<td>'+emailBadge+'</td>'
+        +'<td><div style="display:flex;gap:3px">'
+        +'<button class="icon-btn" data-vi="'+esc(inv.id)+'" title="Ver">👁️</button>'
+        +(inv.customerEmail&&!inv.sent?'<button class="icon-btn" data-ei="'+esc(inv.id)+'" style="color:var(--cy)" title="Enviar email">📧</button>':'')
+        +'</div></td>'
+        +'</tr>';
+    }catch(e){
+      rows+='<tr><td colspan="8" style="color:var(--rd);font-size:11px">Error en factura '+esc(inv.invNum||'?')+'</td></tr>';
+    }
+  });
+  return'<div class="page">'
+    +'<div class="ph"><h1>📄 Facturas</h1>'
+    +'<span class="bdg byw">'+G.invoices.filter(function(i){return i.customerEmail&&!i.sent;}).length+' pendientes de envío</span>'
+    +'</div>'
+    +'<input class="si" id="inv-search" placeholder="🔍 Buscar por número, cliente, placa..." value="'+esc(G.invSearch||'')+'">'
+    +(fil.length>100?'<div style="font-size:12px;color:var(--mu);margin-bottom:8px">Mostrando 100 de '+fil.length+' facturas. Buscá para filtrar.</div>':'')
+    +'<table>'
+    +'<thead><tr><th>N° Factura</th><th>Fecha</th><th>Cliente</th><th>Placa</th><th>Total</th><th>Pago</th><th>Email</th><th></th></tr></thead>'
+    +'<tbody>'+(rows||'<tr><td colspan="8" style="text-align:center;padding:28px;color:var(--mu)">Sin facturas</td></tr>')+'</tbody>'
+    +'</table>'
+    +'</div>';
 }
 function pgReports(){
   const td=G.transactions.filter(t=>new Date(t.date).toDateString()===new Date().toDateString());
