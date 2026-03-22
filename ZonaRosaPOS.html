@@ -1517,57 +1517,62 @@ function pgQueue(){
   }
 
   // HISTORIAL VIEW
-  return`<div class="page">
-    <div class="ph">
-      <h1>📋 Historial de Pizarra</h1>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn cy" id="tab-pizarra">← Pizarra</button>
-        <button class="btn" id="export-qhist" style="background:var(--sf2)">⬇ Exportar Excel</button>
-      </div>
-    </div>
-    <!-- Filtros -->
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
-      ${[['hoy','Hoy'],['semana','Esta semana'],['todo','Todo']].map(([k,l])=>
-        `<button class="psb ${tab===k?'active':''}" data-qht="${k}">${l}</button>`).join('')}
-    </div>
-    <!-- Stats del historial -->
-    <div class="q-stat-bar" style="margin-bottom:16px">
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${histTotal}</div><div class="q-stat-lbl">🚗 Vehículos</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${histAvg?histAvg+'m':'—'}</div><div class="q-stat-lbl">⏱ Tiempo promedio</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${[...new Set(filtHist.map(h=>h.plate).filter(Boolean))].length}</div><div class="q-stat-lbl">🏷 Placas únicas</div></div>
-      <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${[...new Set(filtHist.map(h=>new Date(h.doneAt).toDateString()))].length}</div><div class="q-stat-lbl">📅 Días con servicio</div></div>
-    </div>
-    <!-- Tabla historial -->
-    ${filtHist.length===0
-      ?`<div class="empty-state"><div class="es-icon">📋</div><p>Sin registros en este período.</p></div>`
-      :`<div class="scard" style="padding:0;overflow:hidden">
-        <table>
-          <thead><tr>
-            <th>Fecha</th><th>Hora entrada</th><th>Hora salida</th><th>Duración</th>
-            <th>Placa</th><th>Vehículo</th><th>Cliente</th><th>Servicios</th><th>Nota</th>
-          </tr></thead>
-          <tbody>
-            ${filtHist.map(h=>{
-              const entrada=new Date(h.createdAt);
-              const salida=new Date(h.doneAt);
-              const mins=h.realMins||0;
-              const dur=mins>=60?(Math.floor(mins/60)+'h '+(mins%60)+'m'):(mins+'m');
-              return`<tr>
-                <td style="font-size:12px;white-space:nowrap">${entrada.toLocaleDateString('es-CR')}</td>
-                <td style="font-size:12px;white-space:nowrap">${entrada.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'})}</td>
-                <td style="font-size:12px;white-space:nowrap">${salida.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'})}</td>
-                <td style="font-family:'Rajdhani',sans-serif;font-weight:700;color:var(--cy);font-size:14px">${h.startedAt?dur:'—'}</td>
-                <td>${h.plate?`<span class="plate" style="font-size:11px">${esc(h.plate)}</span>`:'—'}</td>
-                <td style="font-size:12px">${VT[h.vehicleType]||h.vehicleType||'—'}</td>
-                <td style="font-size:12px">${esc(h.customerName||'—')}</td>
-                <td style="font-size:11px;color:var(--mu)">${(h.services||[]).join(', ')||'—'}</td>
-                <td style="font-size:11px;color:var(--mu);font-style:italic">${esc(h.note||'')}</td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>`}
-  </div>`;
+  var histHTML='<div class="page">';
+  histHTML+='<div class="ph"><h1>📋 Historial de Pizarra</h1>';
+  histHTML+='<div style="display:flex;gap:8px;flex-wrap:wrap">';
+  histHTML+='<button class="btn cy" id="tab-pizarra">← Pizarra</button>';
+  histHTML+='<button class="btn" id="export-qhist" style="background:var(--sf2)">⬇ Exportar CSV</button>';
+  histHTML+='</div></div>';
+
+  // Filtros
+  histHTML+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">';
+  [['hoy','Hoy'],['semana','Esta semana'],['todo','Todo']].forEach(function(pair){
+    histHTML+='<button class="psb '+(tab===pair[0]?'active':'')+'" data-qht="'+pair[0]+'">'+pair[1]+'</button>';
+  });
+  histHTML+='</div>';
+
+  // Stats
+  var uniquePlates=[...new Set(filtHist.map(function(h){return h.plate;}).filter(Boolean))].length;
+  var uniqueDays=[...new Set(filtHist.map(function(h){return h.doneAt?new Date(h.doneAt).toDateString():'';}).filter(Boolean))].length;
+  histHTML+='<div class="q-stat-bar" style="margin-bottom:16px">';
+  histHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">'+histTotal+'</div><div class="q-stat-lbl">🚗 Vehículos</div></div>';
+  histHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">'+(histAvg?histAvg+'m':'—')+'</div><div class="q-stat-lbl">⏱ Tiempo promedio</div></div>';
+  histHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">'+uniquePlates+'</div><div class="q-stat-lbl">🏷 Placas únicas</div></div>';
+  histHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">'+uniqueDays+'</div><div class="q-stat-lbl">📅 Días con servicio</div></div>';
+  histHTML+='</div>';
+
+  // Tabla
+  if(filtHist.length===0){
+    histHTML+='<div class="empty-state"><div class="es-icon">📋</div><p>Sin registros en este período.</p></div>';
+  } else {
+    histHTML+='<div class="scard" style="padding:0;overflow:hidden"><table>';
+    histHTML+='<thead><tr><th>Fecha</th><th>Hora entrada</th><th>Hora salida</th><th>Duración</th><th>Placa</th><th>Vehículo</th><th>Cliente</th><th>Servicios</th><th>Nota</th></tr></thead>';
+    histHTML+='<tbody>';
+    filtHist.forEach(function(h){
+      try{
+        var entrada=new Date(h.createdAt||Date.now());
+        var salida=new Date(h.doneAt||Date.now());
+        var mins=h.realMins||0;
+        var dur=mins>=60?(Math.floor(mins/60)+'h '+(mins%60)+'m'):(mins+'m');
+        histHTML+='<tr>'
+          +'<td style="font-size:12px;white-space:nowrap">'+entrada.toLocaleDateString('es-CR')+'</td>'
+          +'<td style="font-size:12px;white-space:nowrap">'+entrada.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'})+'</td>'
+          +'<td style="font-size:12px;white-space:nowrap">'+(h.doneAt?salida.toLocaleTimeString('es-CR',{hour:'2-digit',minute:'2-digit'}):'—')+'</td>'
+          +'<td style="font-family:\'Rajdhani\',sans-serif;font-weight:700;color:var(--cy);font-size:14px">'+(h.startedAt?dur:'—')+'</td>'
+          +'<td>'+(h.plate?'<span class="plate" style="font-size:11px">'+esc(h.plate)+'</span>':'—')+'</td>'
+          +'<td style="font-size:12px">'+esc(VT[h.vehicleType]||h.vehicleType||'—')+'</td>'
+          +'<td style="font-size:12px">'+esc(h.customerName||'—')+'</td>'
+          +'<td style="font-size:11px;color:var(--mu)">'+esc((h.services||[]).join(', ')||'—')+'</td>'
+          +'<td style="font-size:11px;color:var(--mu);font-style:italic">'+esc(h.note||'')+'</td>'
+          +'</tr>';
+      }catch(e){
+        histHTML+='<tr><td colspan="9" style="color:var(--rd);font-size:11px">Error en registro</td></tr>';
+      }
+    });
+    histHTML+='</tbody></table></div>';
+  }
+  histHTML+='</div>';
+  return histHTML;
 }
 
 function renderQCard(q){
