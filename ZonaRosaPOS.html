@@ -349,6 +349,8 @@ input[type=number]::-webkit-inner-spin-button{opacity:.5}
 
 .orig-price{text-decoration:line-through;color:var(--mu);font-size:11px;margin-right:3px}
 .disco-badge{background:rgba(255,214,0,.15);border:1px solid rgba(255,214,0,.3);border-radius:5px;color:var(--yw);font-size:10px;font-weight:700;padding:1px 5px;margin-left:3px}
+.q-cust-result:hover{background:var(--sf2)!important}
+.q-cust-result:last-child{border-bottom:none!important}
 .q-progress-wrap{margin:8px 0 3px;height:6px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden}
 .q-progress-bar{height:100%;border-radius:4px;transition:width .5s,background .5s}
 .q-eta{font-size:11px;font-weight:700;margin-top:3px}
@@ -405,7 +407,7 @@ input[type=number]::-webkit-inner-spin-button{opacity:.5}
 // ══════════════════════════════════════════════════════
 //  ZONA ROSA POS v4.0 — Con Inventario de Productos
 // ══════════════════════════════════════════════════════
-const K={svcs:'zr_svcs',tx:'zr_tx',exp:'zr_exp',users:'zr_users',custs:'zr_custs',set:'zr_set',invs:'zr_invs',queue:'zr_queue',prods:'zr_prods',movs:'zr_movs',purch:'zr_purch',qhist:'zr_qhist'};
+const K={svcs:'zr_svcs',tx:'zr_tx',exp:'zr_exp',users:'zr_users',custs:'zr_custs',set:'zr_set',invs:'zr_invs',queue:'zr_queue',prods:'zr_prods',movs:'zr_movs',purch:'zr_purch',qhist:'zr_qhist',transactions:'zr_tx',invoices:'zr_invs'};
 const RP={admin:['dashboard','pos','queue','inventory','clients','invoices','reports','accounting','services','users','backup','settings'],cajero:['pos','queue','inventory','clients','invoices'],contador:['reports','accounting']};
 const ALL_PERMS=[
   {id:'dashboard',label:'🏠 Dashboard',group:'Principal'},
@@ -512,7 +514,7 @@ const G={
   fe:{concept:'',amount:'',category:'Insumos'},
   fadj:{productId:null,type:'add',qty:'',reason:''},
   fpurch:{productId:null,qty:'',costPrice:'',supplier:'',notes:''},
-  accTab:'pl',accMonth:mk(),clientSearch:'',invSearch:'',invTab:'products',invCat:'all',
+  accTab:'pl',accMonth:mk(),clientSearch:'',invSearch:'',invTab:'products',invCat:'all',qCustSearch:'',pendingQueueAfterCust:false,qPreFill:null,
   lastBackup:null,custHistId:null,
   driveToken:null,driveUserEmail:null,lastDriveBackup:null,driveFiles:[],sheetsId:ls('zr_sheets_id',null),lastSheetsSync:ls('zr_last_sheets_sync',null),
   backupReminder:false,
@@ -520,7 +522,10 @@ const G={
   pwaPrompt:null,
 };
 
-const save=k=>ss(K[k],G[k]);
+// Mapa de claves K → propiedades de G (porque los nombres no coinciden)
+const GMAP={svcs:'services',tx:'transactions',exp:'expenses',users:'users',custs:'customers',set:'settings',invs:'invoices',queue:'queue',prods:'products',movs:'movements',purch:'purchases',qhist:'queueHistory',transactions:'transactions',invoices:'invoices'};
+const save=function(k){ss(K[k],G[GMAP[k]||k]);};
+
 function getUserPerms(u){return u.permissions||(RP[u.role]||[]);}
 const canAccess=p=>G.currentUser&&getUserPerms(G.currentUser).indexOf(p)>=0;
 const cartSub=()=>Math.round(G.cart.reduce((s,i)=>s+i.price*i.qty,0));
@@ -701,30 +706,82 @@ function checkout(){
 }
 
 // ── PIZARRA ──
-function addToQueue(plate,vt,name,note,services){
-  G.queue.unshift({id:uid(),plate:(plate||'').toUpperCase(),vehicleType:vt||'sedan',customerName:name||'',note:note||'',services:services||[],status:'wait',createdAt:new Date().toISOString(),startedAt:null,doneAt:null});
+function addToQueue(plate,vt,name,note,services,customerId){
+  G.queue.unshift({id:uid(),plate:(plate||'').toUpperCase(),vehicleType:vt||'sedan',customerName:name||'',customerId:customerId||null,note:note||'',services:services||[],status:'wait',createdAt:new Date().toISOString(),startedAt:null,doneAt:null});
   save('queue');render();
 }
 function advanceQueue(id){
   var now=new Date().toISOString();
+  var targetQ=null;
   G.queue=G.queue.map(function(q){
     if(q.id!==id)return q;
     if(q.status==='wait')return Object.assign({},q,{status:'proc',startedAt:now});
     if(q.status==='proc'){
       var done=Object.assign({},q,{status:'done',doneAt:now});
-      // Save to permanent history
       var mins=q.startedAt?Math.round((new Date(now)-new Date(q.startedAt))/60000):0;
       var rec=Object.assign({},done,{realMins:mins,savedAt:now});
       G.queueHistory.unshift(rec);
       if(G.queueHistory.length>500)G.queueHistory=G.queueHistory.slice(0,500);
       ss(K.qhist,G.queueHistory);
+      targetQ=done; // will jump to POS
       return done;
     }
     return q;
   });
-  save('queue');render();
+  save('queue');
+
+  // ── Fix 2: al marcar Listo → ir al POS con todo precargado ──
+  if(targetQ){
+    // Clear cart and set vehicle type
+    G.cart=[];
+    G.cartVehicleType=targetQ.vehicleType||'sedan';
+    G.cartPlate=targetQ.plate||'';
+
+    // Set customer if registered
+    if(targetQ.customerId){
+      var cust=G.customers.find(function(c){return c.id===targetQ.customerId;});
+      G.cartCustomer=cust||null;
+    } else {
+      G.cartCustomer=null;
+    }
+
+    // Add services to cart
+    (targetQ.services||[]).forEach(function(svcName){
+      var svc=G.services.find(function(s){return s.name===svcName&&s.active;});
+      if(!svc)return;
+      var price=getSvcPrice(svc,G.cartVehicleType);
+      var label=svc.pm?(svc.name+' ('+(VT[G.cartVehicleType]||'').replace(/^\S+\s/,'')+')'):svc.name;
+      var key=svc.id+'-'+G.cartVehicleType;
+      var ex=G.cart.find(function(i){return i.key===key;});
+      if(ex){ex.qty++;}
+      else{G.cart.push({key:key,id:svc.id,name:label,emoji:svc.emoji,cat:svc.cat,price:price,qty:1,vehicleType:G.cartVehicleType,type:'service'});}
+    });
+
+    G.view='pos';
+    G.posTab='services';
+    showToast('💳 Listo para cobrar a '+(targetQ.customerName||targetQ.plate||'cliente')+'.');
+  }
+  render();
 }
 function removeQueue(id){G.queue=G.queue.filter(q=>q.id!==id);save('queue');render();}
+function undoQueue(id){
+  G.queue=G.queue.map(function(q){
+    if(q.id!==id||q.status!=='proc')return q;
+    return Object.assign({},q,{status:'wait',startedAt:null});
+  });
+  save('queue');render();showToast('↩ Vehículo regresado a Esperando.');
+}
+function undoDoneQueue(id){
+  // Remove from history
+  G.queueHistory=G.queueHistory.filter(function(h){return h.id!==id;});
+  ss(K.qhist,G.queueHistory);
+  // Revert to proc
+  G.queue=G.queue.map(function(q){
+    if(q.id!==id||q.status!=='done')return q;
+    return Object.assign({},q,{status:'proc',doneAt:null});
+  });
+  save('queue');render();showToast('↩ Vehículo regresado a En Proceso.');
+}
 
 // ── AUTO-RESPALDO ──
 setInterval(function(){
@@ -1405,6 +1462,12 @@ function pgQueue(){
   const histAvg=histTotal?Math.round(filtHist.reduce(function(s,h){return s+(h.realMins||0);},0)/histTotal):0;
 
   if(tab==='pizarra'){
+    const qSearch=G.qCustSearch||'';
+    const qResults=qSearch.length>=2
+      ?G.customers.filter(function(c){
+          return (c.name+' '+(c.plate||'')+' '+(c.phone||'')).toLowerCase().includes(qSearch.toLowerCase());
+        }).slice(0,6)
+      :[];
     return`<div class="page">
       <div class="ph">
         <h1>🚗 Pizarra de Servicios</h1>
@@ -1414,13 +1477,32 @@ function pgQueue(){
           <button class="btn rd" id="reset-queue">🗑 Resetear</button>
         </div>
       </div>
+      <!-- Búsqueda rápida de cliente -->
+      <div style="position:relative;margin-bottom:14px">
+        <input class="si" id="q-cust-search" placeholder="🔍 Buscar cliente por nombre o placa para agregar rápido..." value="${esc(qSearch)}" autocomplete="off">
+        ${qResults.length?`<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--pk);border-radius:0 0 12px 12px;box-shadow:0 8px 24px rgba(0,0,0,.3);overflow:hidden">
+          ${qResults.map(function(c){return`<div class="q-cust-result" data-qcid="${esc(c.id)}" style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--bd);transition:background .1s">
+            <div style="flex:1">
+              <div style="font-weight:600;font-size:14px">${esc(c.name)}</div>
+              <div style="font-size:11px;color:var(--mu)">${c.plate?'🏷 '+esc(c.plate)+'  ·  ':''} ${VT[c.vehicleType]||''}</div>
+            </div>
+            ${c.plate?`<span class="plate" style="font-size:11px">${esc(c.plate)}</span>`:''}
+            <button class="btn cy" style="padding:4px 10px;font-size:12px;flex-shrink:0">+ Pizarra</button>
+          </div>`;}).join('')}
+          <div style="padding:9px 14px;display:flex;gap:8px;background:var(--sf2)">
+            <button class="btn cy" style="padding:4px 11px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button>
+            <button class="btn" style="padding:4px 11px;font-size:12px;background:var(--sf)" id="add-queue-no-client">+ Sin cliente</button>
+          </div>
+        </div>`:''}
+        ${qSearch.length>=2&&!qResults.length?`<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--bd);border-radius:0 0 12px 12px;padding:12px 14px;font-size:13px;color:var(--mu)">Sin clientes · <button class="btn cy" style="padding:3px 10px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button> <button class="btn" style="padding:3px 10px;font-size:12px;background:var(--sf2)" id="add-queue-no-client">+ Sin cliente</button></div>`:''}
+      </div>
       <div class="q-stat-bar">
         <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${stats.waiting}</div><div class="q-stat-lbl">⏳ Esperando</div></div>
         <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${stats.inProcess}</div><div class="q-stat-lbl">🔧 En Proceso</div></div>
         <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${stats.completedToday}</div><div class="q-stat-lbl">✅ Completados hoy</div></div>
         <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${stats.avgMins?stats.avgMins+'m':'—'}</div><div class="q-stat-lbl">⏱ Promedio/servicio</div></div>
       </div>
-      ${active.length===0&&done.length===0?`<div class="empty-state"><div class="es-icon">🚗</div><p>Sin vehículos en la pizarra.</p><p style="font-size:11px;margin-top:6px">Agregá uno con el botón de arriba.</p></div>`:''}
+      ${active.length===0&&done.length===0?`<div class="empty-state"><div class="es-icon">🚗</div><p>Sin vehículos en la pizarra.</p><p style="font-size:11px;margin-top:6px">Buscá un cliente arriba o agregá con el botón.</p></div>`:''}
       ${active.length>0?`
         <div>
           <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Activos (${active.length})</div>
@@ -1528,6 +1610,8 @@ function renderQCard(q){
     ${q.note?`<div style="margin-top:4px;font-size:11px;color:var(--tx2);font-style:italic">📝 ${esc(q.note)}</div>`:''}
     <div class="q-actions">
       <span class="bdg ${st.cls}">${st.label}</span>
+      ${q.status==='proc'?`<button class="icon-btn" title="Deshacer — volver a Esperando" data-undo="${q.id}" style="color:var(--yw);border-color:rgba(255,214,0,.3)">↩</button>`:''}
+      ${q.status==='done'?`<button class="icon-btn" title="Devolver a En Proceso" data-undodone="${q.id}" style="color:var(--cy);border-color:rgba(0,229,255,.3)">↩</button>`:''}
       ${q.status!=='done'?`<button class="btn ${q.status==='wait'?'cy':'gn'}" style="padding:4px 9px;font-size:11px" data-adv="${q.id}">${q.status==='wait'?'▶ Iniciar':'✅ Listo'}</button>`:''}
       ${q.status==='done'&&(cu&&cu.phone)?`<button class="wa-btn" onclick="openWA('¡Hola! Tu vehículo está listo en ${esc(G.settings.businessName)} 🌸','${esc(cu.phone)}')">📲 Avisar</button>`:''}
       <button class="icon-btn" data-rmq="${q.id}" style="margin-left:auto">✕</button>
@@ -2389,6 +2473,7 @@ function renderExpModal(){
 }
 
 function renderQueueModal(){
+  var pf=G.qPreFill||{};
   var svcCats=[...new Set(G.services.filter(function(s){return s.active;}).map(function(s){return s.cat;}))];
   var svcHTML='';
   svcCats.forEach(function(cat){
@@ -2408,13 +2493,13 @@ function renderQueueModal(){
     <div class="md" onclick="event.stopPropagation()" style="max-width:540px">
       <h2>🚗 Agregar a la Pizarra</h2>
       <div class="fgrid">
-        <div class="ff"><label class="fl">Placa</label><input class="fi" id="qq-plate" placeholder="ABC-123" style="text-transform:uppercase;font-family:'Orbitron',monospace;font-weight:700;color:var(--yw)"></div>
+        <div class="ff"><label class="fl">Placa</label><input class="fi" id="qq-plate" placeholder="ABC-123" value="${esc(pf.plate||'')}" style="text-transform:uppercase;font-family:'Orbitron',monospace;font-weight:700;color:var(--yw)"></div>
         <div class="ff"><label class="fl">Tipo de Vehículo</label>
-          <select class="fi" id="qq-vt">${Object.entries(VT).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></div>
+          <select class="fi" id="qq-vt">${Object.entries(VT).map(([k,v])=>`<option value="${k}" ${(pf.vehicleType||'sedan')===k?'selected':''}>${v}</option>`).join('')}</select></div>
         <div class="ff full"><label class="fl">Cliente (opcional)</label>
           <select class="fi" id="qq-cust">
             <option value="">Sin cliente registrado</option>
-            ${G.customers.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}${c.plate?' — '+c.plate:''}</option>`).join('')}
+            ${G.customers.map(c=>`<option value="${esc(c.id)}" ${pf.custId===c.id?'selected':''}>${esc(c.name)}${c.plate?' — '+c.plate:''}</option>`).join('')}
           </select>
         </div>
         <div class="ff full">
@@ -2714,7 +2799,7 @@ function genInvoiceHTML(inv){
 // ══════════════════════════════════════════════════════
 //  FUNCIONES SAVE (CRUD)
 // ══════════════════════════════════════════════════════
-function closeModal(){G.modal=null;G.editItem=null;render();}
+function closeModal(){G.modal=null;G.editItem=null;G.qPreFill=null;render();}
 
 function saveSvc(){
   const name=(document.getElementById('fp-name')&&document.getElementById('fp-name').value).trim();
@@ -2840,7 +2925,18 @@ function saveCust(){
   };
   if(G.editItem)G.customers=G.customers.map(x=>x.id===c.id?c:x);
   else G.customers.push(c);
-  save('custs');closeModal();showToast('✅ Cliente guardado.');
+  save('custs');
+  if(G.pendingQueueAfterCust&&!G.editItem){
+    G.pendingQueueAfterCust=false;
+    closeModal();
+    addToQueue(c.plate||'',c.vehicleType||'sedan',c.name,'', [], c.id);
+    showToast('✅ Cliente '+c.name+' guardado y agregado a la pizarra.');
+    G.view='queue';
+    render();
+  } else {
+    G.pendingQueueAfterCust=false;
+    closeModal();showToast('✅ Cliente guardado.');
+  }
 }
 
 function saveUser(){
@@ -2885,7 +2981,7 @@ function saveQueueItem(){
   const extra=(document.getElementById('qq-svcs-extra')&&document.getElementById('qq-svcs-extra').value)||'';
   extra.split(',').map(s=>s.trim()).filter(Boolean).forEach(s=>svcs.push(s));
   const note=(document.getElementById('qq-note')&&document.getElementById('qq-note').value.trim())||'';
-  addToQueue(plate,vt,(cust&&cust.name)||'',note,svcs);
+  addToQueue(plate,vt,(cust&&cust.name)||'',note,svcs,custId||null);
   closeModal();
 }
 // ══════════════════════════════════════════════════════
@@ -3448,7 +3544,38 @@ function bindMain(){
   document.getElementById('add-queue')&&document.getElementById('add-queue').addEventListener('click',()=>{G.modal='queue';render();});
   document.getElementById('reset-queue')&&document.getElementById('reset-queue').addEventListener('click',()=>{G.queue=[];save('queue');render();showToast('🗑 Pizarra reseteada.');});
   document.querySelectorAll('[data-adv]').forEach(el=>el.onclick=e=>{e.stopPropagation();advanceQueue(el.dataset.adv);});
-  document.getElementById('tab-hist')&&document.getElementById('tab-hist').addEventListener('click',function(){G.qHistTab='hoy';render();});
+  document.querySelectorAll('[data-undo]').forEach(el=>el.onclick=e=>{e.stopPropagation();undoQueue(el.dataset.undo);});
+  document.querySelectorAll('[data-undodone]').forEach(el=>el.onclick=e=>{e.stopPropagation();undoDoneQueue(el.dataset.undodone);});
+  // Búsqueda rápida pizarra
+  const qcs=document.getElementById('q-cust-search');
+  if(qcs){
+    qcs.addEventListener('input',function(){G.qCustSearch=this.value;render();});
+    qcs.addEventListener('keydown',function(e){e.stopPropagation();});
+  }
+  document.querySelectorAll('.q-cust-result').forEach(function(el){
+    el.addEventListener('click',function(){
+      const cid=el.dataset.qcid;
+      const c=G.customers.find(function(x){return x.id===cid;});
+      if(!c)return;
+      // Abrir modal pre-llenado con datos del cliente
+      G.qCustSearch='';
+      G.modal='queue';
+      G.qPreFill={custId:c.id,plate:c.plate||'',vehicleType:c.vehicleType||'sedan'};
+      render();
+    });
+  });
+  document.getElementById('add-queue-from-search')&&document.getElementById('add-queue-from-search').addEventListener('click',function(){
+    // Open new client modal, after save will stay in queue view
+    G.qCustSearch='';
+    G.modal='customer';
+    G.editItem=null;
+    G.fc={name:'',phone:'',email:'',plate:'',vehicleType:'sedan',notes:''};
+    G.pendingQueueAfterCust=true; // flag to redirect to queue after saving
+    render();
+  });
+  document.getElementById('add-queue-no-client')&&document.getElementById('add-queue-no-client').addEventListener('click',function(){
+    G.qCustSearch='';G.modal='queue';render();
+  });
   document.getElementById('tab-pizarra')&&document.getElementById('tab-pizarra').addEventListener('click',function(){G.qHistTab='pizarra';render();});
   document.getElementById('export-qhist')&&document.getElementById('export-qhist').addEventListener('click',function(){exportQueueHistory();});
   document.querySelectorAll('[data-qht]').forEach(function(el){el.onclick=function(){G.qHistTab=el.dataset.qht;render();};});
@@ -3656,7 +3783,50 @@ window.addEventListener('appinstalled',function(){
   }
 })();
 
-// ── ARRANQUE ──
+// ── INSTANCIA ÚNICA — impide abrir 2 pestañas ──
+(function(){
+  var LOCK_KEY='zr_instance_lock';
+  var INSTANCE_ID=Date.now()+'-'+Math.random().toString(36).slice(2);
+  
+  // Check if another tab is already open
+  var existing=ls(LOCK_KEY,null);
+  if(existing&&(Date.now()-existing.ts)<10000){
+    // Another tab opened less than 10 seconds ago — show warning
+    document.body.innerHTML='<div style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#06030f;font-family:sans-serif;text-align:center;padding:20px">'
+      +'<div style="background:#1a0530;border:2px solid #ff2d78;border-radius:20px;padding:40px;max-width:420px">'
+      +'<div style="font-size:60px;margin-bottom:16px">⚠️</div>'
+      +'<h2 style="color:#ff2d78;font-size:22px;margin-bottom:12px">Zona Rosa ya está abierto</h2>'
+      +'<p style="color:#aaa;line-height:1.6;margin-bottom:24px">El sistema ya está abierto en otra pestaña o ventana. Para evitar conflictos de datos, solo se permite una instancia a la vez.</p>'
+      +'<p style="color:#888;font-size:13px;margin-bottom:24px">Cerrá la otra pestaña y volvé a intentarlo, o hacé clic en "Usar esta pestaña" para continuar aquí.</p>'
+      +'<button onclick="forceOpen()" style="background:#ff2d78;color:#fff;border:none;padding:12px 28px;border-radius:10px;font-size:15px;font-weight:700;cursor:pointer">Usar esta pestaña</button>'
+      +'</div></div>';
+    window.forceOpen=function(){
+      ss(LOCK_KEY,{id:INSTANCE_ID,ts:Date.now()});
+      window.location.reload();
+    };
+    return;
+  }
+
+  // Register this instance
+  ss(LOCK_KEY,{id:INSTANCE_ID,ts:Date.now()});
+
+  // Heartbeat — update timestamp every 5 seconds so other tabs know we're alive
+  setInterval(function(){
+    var current=ls(LOCK_KEY,null);
+    // If another tab took over, warn this one
+    if(current&&current.id!==INSTANCE_ID){
+      showToast('⚠️ El sistema fue abierto en otra pestaña. Cerrá esta para evitar conflictos.');
+    } else {
+      ss(LOCK_KEY,{id:INSTANCE_ID,ts:Date.now()});
+    }
+  },5000);
+
+  // Release lock when tab closes
+  window.addEventListener('beforeunload',function(){
+    var current=ls(LOCK_KEY,null);
+    if(current&&current.id===INSTANCE_ID)localStorage.removeItem(LOCK_KEY);
+  });
+})();
 // Contador de visitas diarias
 (function(){
   var today=new Date().toDateString();
