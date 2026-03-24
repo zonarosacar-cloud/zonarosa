@@ -502,7 +502,7 @@ const G={
   customers:ls(K.custs,[]),settings:Object.assign({},DSET,ls(K.set,{})),invoices:ls(K.invs,[]),
   products:ls(K.prods,DPRODS),movements:ls(K.movs,[]),purchases:ls(K.purch,[]),
   queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<2*3600000)),
-  queueHistory:ls(K.qhist,[]),qHistTab:'hoy',
+  queueHistory:ls(K.qhist,[]),qHistTab:'pizarra',
   cart:[],cartCustomer:null,cartPlate:'',cartVehicleType:'sedan',editingPriceKey:null,editingPriceVal:'',
   search:'',svcCat:'all',posTab:'services',prodListView:false,
   payModal:false,payMethod:'cash',cashGiven:'',successTx:null,lastInvoice:null,
@@ -1462,59 +1462,64 @@ function pgQueue(){
   const histAvg=histTotal?Math.round(filtHist.reduce(function(s,h){return s+(h.realMins||0);},0)/histTotal):0;
 
   if(tab==='pizarra'){
-    const qSearch=G.qCustSearch||'';
-    const qResults=qSearch.length>=2
+    var qSearch=G.qCustSearch||'';
+    var qResults=qSearch.length>=2
       ?G.customers.filter(function(c){
-          return (c.name+' '+(c.plate||'')+' '+(c.phone||'')).toLowerCase().includes(qSearch.toLowerCase());
+          return (c.name+' '+(c.plate||'')+' '+(c.phone||'')).toLowerCase().indexOf(qSearch.toLowerCase())>=0;
         }).slice(0,6)
       :[];
-    return`<div class="page">
-      <div class="ph">
-        <h1>🚗 Pizarra de Servicios</h1>
-        <div style="display:flex;gap:8px">
-          <button class="btn cy" id="add-queue">+ Agregar</button>
-          <button class="btn" id="tab-hist" style="background:var(--sf2)">📋 Historial (${G.queueHistory.length})</button>
-          <button class="btn rd" id="reset-queue">🗑 Resetear</button>
-        </div>
-      </div>
-      <!-- Búsqueda rápida de cliente -->
-      <div style="position:relative;margin-bottom:14px">
-        <input class="si" id="q-cust-search" placeholder="🔍 Buscar cliente por nombre o placa para agregar rápido..." value="${esc(qSearch)}" autocomplete="off">
-        ${qResults.length?`<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--pk);border-radius:0 0 12px 12px;box-shadow:0 8px 24px rgba(0,0,0,.3);overflow:hidden">
-          ${qResults.map(function(c){return`<div class="q-cust-result" data-qcid="${esc(c.id)}" style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--bd);transition:background .1s">
-            <div style="flex:1">
-              <div style="font-weight:600;font-size:14px">${esc(c.name)}</div>
-              <div style="font-size:11px;color:var(--mu)">${c.plate?'🏷 '+esc(c.plate)+'  ·  ':''} ${VT[c.vehicleType]||''}</div>
-            </div>
-            ${c.plate?`<span class="plate" style="font-size:11px">${esc(c.plate)}</span>`:''}
-            <button class="btn cy" style="padding:4px 10px;font-size:12px;flex-shrink:0">+ Pizarra</button>
-          </div>`;}).join('')}
-          <div style="padding:9px 14px;display:flex;gap:8px;background:var(--sf2)">
-            <button class="btn cy" style="padding:4px 11px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button>
-            <button class="btn" style="padding:4px 11px;font-size:12px;background:var(--sf)" id="add-queue-no-client">+ Sin cliente</button>
-          </div>
-        </div>`:''}
-        ${qSearch.length>=2&&!qResults.length?`<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--bd);border-radius:0 0 12px 12px;padding:12px 14px;font-size:13px;color:var(--mu)">Sin clientes · <button class="btn cy" style="padding:3px 10px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button> <button class="btn" style="padding:3px 10px;font-size:12px;background:var(--sf2)" id="add-queue-no-client">+ Sin cliente</button></div>`:''}
-      </div>
-      <div class="q-stat-bar">
-        <div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">${stats.waiting}</div><div class="q-stat-lbl">⏳ Esperando</div></div>
-        <div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">${stats.inProcess}</div><div class="q-stat-lbl">🔧 En Proceso</div></div>
-        <div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">${stats.completedToday}</div><div class="q-stat-lbl">✅ Completados hoy</div></div>
-        <div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">${stats.avgMins?stats.avgMins+'m':'—'}</div><div class="q-stat-lbl">⏱ Promedio/servicio</div></div>
-      </div>
-      ${active.length===0&&done.length===0?`<div class="empty-state"><div class="es-icon">🚗</div><p>Sin vehículos en la pizarra.</p><p style="font-size:11px;margin-top:6px">Buscá un cliente arriba o agregá con el botón.</p></div>`:''}
-      ${active.length>0?`
-        <div>
-          <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Activos (${active.length})</div>
-          <div class="queue-grid">${active.map(renderQCard).join('')}</div>
-        </div>`:'' }
-      ${done.length>0?`
-        <div>
-          <div style="font-family:'Rajdhani',sans-serif;font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Completados Recientes</div>
-          <div class="queue-grid">${done.map(renderQCard).join('')}</div>
-        </div>`:'' }
-    </div>`;
+    var pHTML='<div class="page">';
+    pHTML+='<div class="ph"><h1>&#128663; Pizarra de Servicios</h1>';
+    pHTML+='<div style="display:flex;gap:8px">';
+    pHTML+='<button class="btn cy" id="add-queue">+ Agregar</button>';
+    pHTML+='<button class="btn" id="tab-hist" style="background:var(--sf2)">&#128203; Historial ('+G.queueHistory.length+')</button>';
+    pHTML+='<button class="btn rd" id="reset-queue">&#128465; Resetear</button>';
+    pHTML+='</div></div>';
+    pHTML+='<div style="position:relative;margin-bottom:14px">';
+    pHTML+='<input class="si" id="q-cust-search" placeholder="Buscar cliente..." value="'+esc(qSearch)+'" autocomplete="off">';
+    if(qResults.length){
+      pHTML+='<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--pk);border-radius:0 0 12px 12px;box-shadow:0 8px 24px rgba(0,0,0,.3);overflow:hidden">';
+      qResults.forEach(function(c){
+        pHTML+='<div class="q-cust-result" data-qcid="'+esc(c.id)+'" style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--bd)">';
+        pHTML+='<div style="flex:1"><div style="font-weight:600;font-size:14px">'+esc(c.name)+'</div>';
+        pHTML+='<div style="font-size:11px;color:var(--mu)">'+(c.plate?esc(c.plate)+'  &middot;  ':'')+(VT[c.vehicleType]||'')+'</div></div>';
+        if(c.plate)pHTML+='<span class="plate" style="font-size:11px">'+esc(c.plate)+'</span>';
+        pHTML+='<button class="btn cy" style="padding:4px 10px;font-size:12px;flex-shrink:0">+ Pizarra</button>';
+        pHTML+='</div>';
+      });
+      pHTML+='<div style="padding:9px 14px;display:flex;gap:8px;background:var(--sf2)">';
+      pHTML+='<button class="btn cy" style="padding:4px 11px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button>';
+      pHTML+='<button class="btn" style="padding:4px 11px;font-size:12px;background:var(--sf)" id="add-queue-no-client">+ Sin cliente</button>';
+      pHTML+='</div></div>';
+    } else if(qSearch.length>=2){
+      pHTML+='<div style="position:absolute;top:100%;left:0;right:0;z-index:99;background:var(--sf);border:1px solid var(--bd);border-radius:0 0 12px 12px;padding:12px 14px;font-size:13px;color:var(--mu)">';
+      pHTML+='Sin clientes &middot; <button class="btn cy" style="padding:3px 10px;font-size:12px" id="add-queue-from-search">+ Nuevo cliente</button> ';
+      pHTML+='<button class="btn" style="padding:3px 10px;font-size:12px;background:var(--sf2)" id="add-queue-no-client">+ Sin cliente</button></div>';
+    }
+    pHTML+='</div>';
+    pHTML+='<div class="q-stat-bar">';
+    pHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--yw)">'+stats.waiting+'</div><div class="q-stat-lbl">Esperando</div></div>';
+    pHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--cy)">'+stats.inProcess+'</div><div class="q-stat-lbl">En Proceso</div></div>';
+    pHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--gn)">'+stats.completedToday+'</div><div class="q-stat-lbl">Completados hoy</div></div>';
+    pHTML+='<div class="q-stat"><div class="q-stat-val" style="color:var(--pk)">'+(stats.avgMins?stats.avgMins+'m':'&mdash;')+'</div><div class="q-stat-lbl">Promedio/servicio</div></div>';
+    pHTML+='</div>';
+    if(active.length===0&&done.length===0){
+      pHTML+='<div class="empty-state"><div class="es-icon">&#128663;</div><p>Sin veh&iacute;culos en la pizarra.</p></div>';
+    }
+    if(active.length>0){
+      pHTML+='<div><div style="font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Activos ('+active.length+')</div><div class="queue-grid">';
+      active.forEach(function(q){try{pHTML+=renderQCard(q);}catch(e){pHTML+='<div class="qcard">Error</div>';}});
+      pHTML+='</div></div>';
+    }
+    if(done.length>0){
+      pHTML+='<div><div style="font-size:10px;color:var(--mu);text-transform:uppercase;letter-spacing:1.5px;margin-bottom:9px">Completados Recientes</div><div class="queue-grid">';
+      done.forEach(function(q){try{pHTML+=renderQCard(q);}catch(e){pHTML+='<div class="qcard">Error</div>';}});
+      pHTML+='</div></div>';
+    }
+    pHTML+='</div>';
+    return pHTML;
   }
+
 
   // HISTORIAL VIEW
   var histHTML='<div class="page">';
@@ -2497,43 +2502,45 @@ function renderQueueModal(){
     svcHTML+='<div style="font-size:10px;color:var(--mu2);text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:6px">'+esc(cat)+'</div>';
     svcHTML+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
     svcs.forEach(function(s){
-      svcHTML+='<label style="display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--sf);cursor:pointer;font-size:13px;transition:all .15s">'
+      svcHTML+='<label style="display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--sf);cursor:pointer;font-size:13px">'
         +'<input type="checkbox" class="qq-svc-cb" value="'+esc(s.name)+'" style="accent-color:var(--pk);width:14px;height:14px"> '
-        +esc(s.emoji)+' '+esc(s.name)
-        +'</label>';
+        +esc(s.emoji)+' '+esc(s.name)+'</label>';
     });
     svcHTML+='</div></div>';
   });
-  return`<div class="mo" id="modal-overlay">
-    <div class="md" onclick="event.stopPropagation()" style="max-width:540px">
-      <h2>🚗 Agregar a la Pizarra</h2>
-      <div class="fgrid">
-        <div class="ff"><label class="fl">Placa</label><input class="fi" id="qq-plate" placeholder="ABC-123" value="${esc(pf.plate||'')}" style="text-transform:uppercase;font-family:'Orbitron',monospace;font-weight:700;color:var(--yw)"></div>
-        <div class="ff"><label class="fl">Tipo de Vehículo</label>
-          <select class="fi" id="qq-vt">${Object.entries(VT).map(([k,v])=>`<option value="${k}" ${(pf.vehicleType||'sedan')===k?'selected':''}>${v}</option>`).join('')}</select></div>
-        <div class="ff full"><label class="fl">Cliente (opcional)</label>
-          <select class="fi" id="qq-cust">
-            <option value="">Sin cliente registrado</option>
-            ${G.customers.map(c=>`<option value="${esc(c.id)}" ${pf.custId===c.id?'selected':''}>${esc(c.name)}${c.plate?' — '+c.plate:''}</option>`).join('')}
-          </select>
-        </div>
-        <div class="ff full">
-          <label class="fl">Servicios</label>
-          <div style="max-height:220px;overflow-y:auto;padding:8px;border-radius:10px;border:1px solid var(--bd);background:var(--sf2)">
-            ${svcHTML}
-          </div>
-          <div style="margin-top:8px">
-            <input class="fi" id="qq-svcs-extra" placeholder="+ Otros servicios (separados por coma)" style="font-size:13px">
-          </div>
-        </div>
-        <div class="ff full"><label class="fl">Nota</label><input class="fi" id="qq-note" placeholder="Observación adicional"></div>
-      </div>
-      <div class="ma">
-        <button class="bc" id="modal-cancel">Cancelar</button>
-        <button class="bcc" id="save-queue">✅ Agregar</button>
-      </div>
-    </div>
-  </div>`;
+
+  var custOpts='<option value="">Sin cliente registrado</option>';
+  G.customers.forEach(function(c){
+    custOpts+='<option value="'+esc(c.id)+'"'+(pf.custId===c.id?' selected':'')+'>'+esc(c.name)+(c.plate?' \u2014 '+c.plate:'')+'</option>';
+  });
+
+  var vtOpts='';
+  Object.entries(VT).forEach(function(kv){
+    vtOpts+='<option value="'+kv[0]+'"'+((pf.vehicleType||'sedan')===kv[0]?' selected':'')+'>'+kv[1]+'</option>';
+  });
+
+  var plateVal=(G.qPreFill&&G.qPreFill.plate)||'';
+
+  var html='<div class="mo" id="modal-overlay">';
+  html+='<div class="md" onclick="event.stopPropagation()" style="max-width:540px">';
+  html+='<h2>&#128663; Agregar a la Pizarra</h2>';
+  html+='<div class="fgrid">';
+  html+='<div class="ff"><label class="fl">Placa</label>';
+  html+='<input class="fi" id="qq-plate" placeholder="ABC-123" value="'+plateVal+'" style="text-transform:uppercase;font-family:\'Orbitron\',monospace;font-weight:700;color:var(--yw)"></div>';
+  html+='<div class="ff"><label class="fl">Tipo de Veh\xedculo</label>';
+  html+='<select class="fi" id="qq-vt">'+vtOpts+'</select></div>';
+  html+='<div class="ff full"><label class="fl">Cliente (opcional)</label>';
+  html+='<select class="fi" id="qq-cust">'+custOpts+'</select></div>';
+  html+='<div class="ff full"><label class="fl">Servicios</label>';
+  html+='<div style="max-height:220px;overflow-y:auto;padding:8px;border-radius:10px;border:1px solid var(--bd);background:var(--sf2)">'+svcHTML+'</div>';
+  html+='<div style="margin-top:8px"><input class="fi" id="qq-svcs-extra" placeholder="+ Otros servicios (separados por coma)" style="font-size:13px"></div></div>';
+  html+='<div class="ff full"><label class="fl">Nota</label>';
+  html+='<input class="fi" id="qq-note" placeholder="Observaci\xf3n adicional"></div>';
+  html+='</div>';
+  html+='<div class="ma"><button class="bc" id="modal-cancel">Cancelar</button>';
+  html+='<button class="bcc" id="save-queue">&#10003; Agregar</button></div>';
+  html+='</div></div>';
+  return html;
 }
 
 function renderConfirmModal(){
@@ -2986,7 +2993,14 @@ function saveExp(){
 }
 
 function saveQueueItem(){
-  const plate=((document.getElementById('qq-plate')&&document.getElementById('qq-plate').value)||'').toUpperCase().trim();
+  const plateInput=document.getElementById('qq-plate');
+  let plate=(plateInput&&plateInput.value||'').toUpperCase().trim();
+  if(!plate && G.qPreFill && G.qPreFill.plate){plate=G.qPreFill.plate;}
+  if(!plate){
+    const custIdTmp=(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null;
+    const cTmp=G.customers.find(c=>c.id===custIdTmp);
+    if(cTmp && cTmp.plate)plate=cTmp.plate;
+  }
   const vt=(document.getElementById('qq-vt')&&document.getElementById('qq-vt').value)||'sedan';
   const custId=(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null;
   const cust=G.customers.find(c=>c.id===custId);
@@ -3591,6 +3605,7 @@ function bindMain(){
   document.getElementById('add-queue-no-client')&&document.getElementById('add-queue-no-client').addEventListener('click',function(){
     G.qCustSearch='';G.modal='queue';render();
   });
+  document.getElementById('tab-hist')&&document.getElementById('tab-hist').addEventListener('click',function(){G.qHistTab='hoy';render();});
   document.getElementById('tab-pizarra')&&document.getElementById('tab-pizarra').addEventListener('click',function(){G.qHistTab='pizarra';render();});
   document.getElementById('export-qhist')&&document.getElementById('export-qhist').addEventListener('click',function(){exportQueueHistory();});
   document.querySelectorAll('[data-qht]').forEach(function(el){el.onclick=function(){G.qHistTab=el.dataset.qht;render();};});
