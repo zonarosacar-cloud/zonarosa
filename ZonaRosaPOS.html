@@ -442,7 +442,8 @@ const fmtD=d=>new Date(d).toLocaleDateString('es-CR',{day:'numeric',month:'short
 const fmtDT=d=>new Date(d).toLocaleString('es-CR',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
 function esc(s){s=(s==null)?'':String(s);return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 const ls=(k,def)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):def}catch(e){return def}};
-const ss=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}};
+// ss() — escribe a IDB (fuente de verdad) + LS (caché)
+const ss=(k,v)=>{_idbWrite(k,v);};
 const mk=()=>{const d=new Date();return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`};
 const monthLabel=k=>{if(!k)return'';const[y,m]=k.split('-');return`${MONTHS[+m-1]} ${y}`};
 const getLoyaltyTier=sp=>{if(sp>=200000)return{label:'👑 VIP',cls:'lb-vip'};if(sp>=80000)return{label:'🥇 Gold',cls:'lb-gold'};if(sp>=30000)return{label:'🥈 Silver',cls:'lb-silver'};return{label:'🥉 Bronze',cls:'lb-bronze'}};
@@ -454,7 +455,10 @@ const stockLbl=p=>p.stock<=0?'Sin stock':p.stock<=p.minStock?'⚠️ Bajo':p.sto
 const getLowStock=()=>G.products.filter(p=>p.active&&p.stock<=p.minStock);
 
 function showToast(msg,color){
-  const t=document.createElement('div');t.className='toast';t.innerHTML=msg;
+  const t=document.createElement('div');t.className='toast';
+  // Use textContent to prevent XSS — emojis and text are safe
+  t.textContent=msg;
+  if(color)t.style.borderColor=color;
   document.body.appendChild(t);
   setTimeout(()=>{t.style.animation='toastIn .3s reverse';setTimeout(()=>t.remove(),300)},3500);
 }
@@ -501,7 +505,7 @@ const G={
   users:ls(K.users,[{id:'u1',name:'Admin',role:'admin',pin:'1234',emoji:'👑'},{id:'u2',name:'Cajero',role:'cajero',pin:'0000',emoji:'🔑'}]),
   customers:ls(K.custs,[]),settings:Object.assign({},DSET,ls(K.set,{})),invoices:ls(K.invs,[]),
   products:ls(K.prods,DPRODS),movements:ls(K.movs,[]),purchases:ls(K.purch,[]),
-  queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<2*3600000)),
+  queue:ls(K.queue,[]).filter(q=>q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<24*3600000)),
   queueHistory:ls(K.qhist,[]),qHistTab:'pizarra',
   cart:[],cartCustomer:null,cartPlate:'',cartVehicleType:'sedan',editingPriceKey:null,editingPriceVal:'',
   search:'',svcCat:'all',posTab:'services',prodListView:false,
@@ -514,7 +518,7 @@ const G={
   fe:{concept:'',amount:'',category:'Insumos'},
   fadj:{productId:null,type:'add',qty:'',reason:''},
   fpurch:{productId:null,qty:'',costPrice:'',supplier:'',notes:''},
-  accTab:'pl',accMonth:mk(),clientSearch:'',invSearch:'',invTab:'products',invCat:'all',qCustSearch:'',pendingQueueAfterCust:false,qPreFill:null,
+  accTab:'pl',accMonth:mk(),clientSearch:'',invSearch:'',invTab:'products',invCat:'all',qCustSearch:'',pendingQueueAfterCust:false,qPreFill:null,queueDraft:null,
   lastBackup:null,custHistId:null,
   driveToken:null,driveUserEmail:null,lastDriveBackup:null,driveFiles:[],sheetsId:ls('zr_sheets_id',null),lastSheetsSync:ls('zr_last_sheets_sync',null),
   backupReminder:false,
@@ -522,9 +526,237 @@ const G={
   pwaPrompt:null,
 };
 
-// Mapa de claves K → propiedades de G (porque los nombres no coinciden)
+// ══════════════════════════════════════════════════════
+//  STORAGE ENGINE — IndexedDB como fuente única de verdad
+//  localStorage = caché de lectura rápida SOLAMENTE
+//  Todo write va a IDB primero, luego actualiza caché LS
+// ══════════════════════════════════════════════════════
+var _IDB=null,_idbQ=[],_idbReady=false;
+
+// Abre IDB y al estar listo decide quién manda
+(function(){
+  try{
+    var r=indexedDB.open('ZonaRosaPOS',2);
+    r.onupgradeneeded=function(e){
+      try{
+        var db=e.target.result;
+        if(!db.objectStoreNames.contains('kv'))db.createObjectStore('kv');
+        if(!db.objectStoreNames.contains('meta'))db.createObjectStore('meta');
+      }catch(x){}
+    };
+    r.onsuccess=function(e){
+      _IDB=e.target.result;
+      _idbReady=true;
+      // Flush escrituras pendidas mientras IDB abría
+      var q=_idbQ.slice();_idbQ=[];
+      q.forEach(function(item){_idbWrite(item[0],item[1]);});
+      // IDB abierto — resolver fuente de verdad
+      _resolveSourceOfTruth();
+    };
+    r.onerror=function(e){console.warn('IDB error:',e);};
+    r.onblocked=function(){console.warn('IDB blocked');};
+  }catch(e){console.warn('IDB not available:',e);}
+})();
+
+// Escritura directa a IDB (interna)
+function _idbWrite(k,v){
+  if(!_IDB){_idbQ.push([k,v]);return;}
+  try{
+    var tx=_IDB.transaction('kv','readwrite');
+    tx.objectStore('kv').put(v,k);
+    // También actualizar localStorage como caché (sin depender de él)
+    try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}
+  }catch(e){}
+}
+
+// idbSet público — para uso externo
+function idbSet(k,v){_idbWrite(k,v);}
+
+// Leer TODO de IDB de una vez
+function idbGetAll(cb){
+  if(!_IDB){cb({});return;}
+  try{
+    var res={};
+    var tx=_IDB.transaction('kv','readonly');
+    var req=tx.objectStore('kv').openCursor();
+    req.onsuccess=function(e){
+      var c=e.target.result;
+      if(c){res[c.key]=c.value;c.continue();}
+    };
+    tx.oncomplete=function(){cb(res);};
+    tx.onerror=function(){cb({});};
+  }catch(e){cb({});}
+}
+
+// ─── RESOLUCIÓN DE FUENTE DE VERDAD ───────────────────
+// Usa lastSaved timestamp para decidir quién gana.
+// Cantidad de registros es secundaria — el timestamp manda.
+// Antes de cargar, valida integridad básica de ambas fuentes.
+function _resolveSourceOfTruth(){
+  idbGetAll(function(idb){
+    // Timestamps de último guardado
+    var lsTs=ls('zr_last_saved',0)||0;
+    var idbTs=idb['zr_last_saved']||0;
+
+    // Datos en cada fuente
+    var lsTx=G.transactions||[];
+    var lsCusts=G.customers||[];
+    var idbTx=idb[K.tx]||[];
+    var idbCusts=idb[K.custs]||[];
+
+    var lsEmpty=(lsTx.length===0&&lsCusts.length===0);
+    var idbHasData=(idbTx.length>0||idbCusts.length>0);
+
+    // Decidir quién gana
+    // Regla 1: Si LS vacío y IDB tiene datos → IDB gana (Brave borró LS)
+    // Regla 2: Si IDB timestamp > LS timestamp → IDB gana (IDB más reciente)
+    // Regla 3: Si IDB tiene significativamente más registros → IDB gana
+    // Regla 4: En cualquier otro caso → RAM (cargado de LS) gana → sync a IDB
+    var idbWins=false;
+    var reason='';
+
+    if(lsEmpty&&idbHasData){
+      idbWins=true;reason='LS vacio, IDB tiene datos';
+    } else if(idbTs>lsTs&&idbTs>(Date.now()-3600000)){
+      // IDB mas reciente Y fue guardado hace menos de 1 hora
+      idbWins=true;reason='IDB timestamp mas reciente';
+    } else if(idbTx.length>lsTx.length+2){
+      // IDB tiene 3+ ventas mas (podria haber tenido actividad en otra sesion)
+      idbWins=true;reason='IDB tiene '+idbTx.length+' ventas vs LS '+lsTx.length;
+    }
+
+    if(idbWins){
+      // Validar integridad básica de IDB antes de usarlo
+      var idbValid=_validateIntegrity(idb);
+      if(!idbValid.ok){
+        // IDB tiene datos corruptos — no usarlo, avisar
+        showToast('\u26a0\ufe0f IDB tiene inconsistencias ('+idbValid.issue+'). Usando datos locales.');
+        // Sync RAM → IDB para sobreescribir la corrupción
+        _syncRamToIdb();
+        return;
+      }
+      // IDB válido — cargar en RAM
+      G.transactions=idbTx;
+      G.expenses=idb[K.exp]||G.expenses||[];
+      G.customers=idbCusts;
+      G.invoices=idb[K.invs]||G.invoices||[];
+      if(idb[K.svcs]&&idb[K.svcs].length)G.services=idb[K.svcs];
+      if(idb[K.prods]&&idb[K.prods].length)G.products=idb[K.prods];
+      G.movements=idb[K.movs]||G.movements||[];
+      G.purchases=idb[K.purch]||G.purchases||[];
+      if(idb[K.users]&&idb[K.users].length)G.users=idb[K.users];
+      G.queue=(idb[K.queue]||G.queue||[]).filter(function(q){
+        return q.status!=='done'||((Date.now()-new Date(q.doneAt||0))<24*3600000);
+      });
+      G.queueHistory=idb[K.qhist]||G.queueHistory||[];
+      G.settings=Object.assign({},DSET,idb[K.set]||{});
+      // Actualizar caché LS
+      Object.keys(idb).forEach(function(k){
+        try{localStorage.setItem(k,JSON.stringify(idb[k]));}catch(e){}
+      });
+      if(lsEmpty&&idbHasData){
+        showToast('\u2705 Datos restaurados: '+idbTx.length+' ventas, '+idbCusts.length+' clientes.');
+      }
+      // Only re-render if user is already logged in — don't interrupt login flow
+      if(G.currentUser){render();}
+    } else {
+      // RAM gana — validar y sync a IDB
+      var ramValid=_validateIntegrity(null);
+      if(!ramValid.ok){
+        showToast('\u26a0\ufe0f Inconsistencia detectada: '+ramValid.issue+'. Revise los datos.');
+      }
+      _syncRamToIdb();
+    }
+  });
+}
+
+// Sincronizar RAM → IDB (RAM ya es fuente de verdad en este path)
+function _syncRamToIdb(){
+  var ts=Date.now();
+  ss('zr_last_saved',ts); // timestamp de sync
+  var allK=['tx','exp','custs','set','invs','svcs','queue','prods','movs','purch','users','qhist'];
+  allK.forEach(function(k){
+    var val=G[GMAP[k]||k];
+    if(val!==undefined&&K[k])_idbWrite(K[k],val);
+  });
+  _idbWrite('zr_last_saved',ts);
+}
+
+// ─── FUNCIONES PÚBLICAS DE ALMACENAMIENTO ─────────────
+
+// ─── INTEGRITY VALIDATOR ──────────────────────────────
+// Valida consistencia básica de los datos antes de usarlos.
+// Recibe null para validar RAM actual, o un objeto IDB para validar IDB.
+function _validateIntegrity(source){
+  try{
+    var txs=source?source[K.tx]:G.transactions;
+    var invs=source?source[K.invs]:G.invoices;
+    var prods=source?source[K.prods]:G.products;
+    var custs=source?source[K.custs]:G.customers;
+    var movs=source?source[K.movs]:G.movements;
+
+    if(!Array.isArray(txs)||!Array.isArray(invs)||!Array.isArray(prods)||!Array.isArray(custs)){
+      return{ok:false,issue:'estructura de datos invalida'};
+    }
+
+    // 1. Facturas huérfanas — transacción sin factura correspondiente
+    // (solo alertar si hay muchas, algún desfase pequeño es normal)
+    var txIds=new Set((txs||[]).map(function(t){return t.id;}));
+    var invTxIds=new Set((invs||[]).map(function(i){return i.id;}));
+    // Cada tx debe tener su inv o no (los muy viejos pueden no tenerla)
+    // Solo verificar estructura básica de cada registro
+    var badTx=0;
+    (txs||[]).forEach(function(t){
+      if(!t.id||!t.date||t.total===undefined)badTx++;
+    });
+    if(badTx>3)return{ok:false,issue:badTx+' transacciones sin estructura valida'};
+
+    // 2. Stock negativo
+    var negStock=(prods||[]).filter(function(p){return p.stock<-5;});
+    if(negStock.length>3)return{ok:false,issue:negStock.length+' productos con stock muy negativo'};
+
+    // 3. Montos absurdos (ventas > 10 millones CRC — probablemente error)
+    var badAmounts=(txs||[]).filter(function(t){return t.total>10000000||t.total<0;});
+    if(badAmounts.length>0)return{ok:false,issue:'montos fuera de rango en '+badAmounts.length+' ventas'};
+
+    // 4. Clientes duplicados por ID
+    var custIds=(custs||[]).map(function(c){return c.id;});
+    var uniqueCustIds=new Set(custIds);
+    if(custIds.length-uniqueCustIds.size>5)return{ok:false,issue:'clientes duplicados: '+(custIds.length-uniqueCustIds.size)};
+
+    return{ok:true,issue:null};
+  }catch(e){
+    return{ok:false,issue:'error en validacion: '+e.message};
+  }
+}
+
+// Función pública de validación con reporte
+function validateAndReport(){
+  var result=_validateIntegrity(null);
+  if(result.ok){
+    showToast('\u2705 Integridad de datos: OK. '+(G.transactions?G.transactions.length:0)+' ventas, '+(G.customers?G.customers.length:0)+' clientes, '+(G.products?G.products.length:0)+' productos.');
+  } else {
+    showToast('\u26a0\ufe0f Problema detectado: '+result.issue+'. Revise los datos o restaure un respaldo.');
+  }
+  return result;
+}
+
+// Mapa de claves K → propiedades de G
 const GMAP={svcs:'services',tx:'transactions',exp:'expenses',users:'users',custs:'customers',set:'settings',invs:'invoices',queue:'queue',prods:'products',movs:'movements',purch:'purchases',qhist:'queueHistory',transactions:'transactions',invoices:'invoices'};
-const save=function(k){ss(K[k],G[GMAP[k]||k]);};
+
+// save(k) — IDB es la fuente de verdad, LS es caché
+// Escribe a IDB (que internamente también actualiza LS)
+// Actualiza el timestamp zr_last_saved en cada write
+const save=function(k){
+  var val=G[GMAP[k]||k];
+  if(val===undefined)return;
+  _idbWrite(K[k],val);
+  // Actualizar timestamp en cada save para _resolveSourceOfTruth
+  var ts=Date.now();
+  try{localStorage.setItem('zr_last_saved',ts);}catch(e){}
+  _idbWrite('zr_last_saved',ts);
+};
+
 
 function getUserPerms(u){return u.permissions||(RP[u.role]||[]);}
 const canAccess=p=>G.currentUser&&getUserPerms(G.currentUser).indexOf(p)>=0;
@@ -572,7 +804,12 @@ function logMovement(productId,type,qty,reason,ref){
 }
 
 // ── FACTURACIÓN ──
-function nextInvNum(){const n=(ls('zr_inv_num',0)+1);ss('zr_inv_num',n);return`${G.settings.invoicePrefix||'ZR'}-${String(n).padStart(5,'0')}`;}
+function nextInvNum(){
+  // Read from localStorage (sync) then persist to both LS+IDB via ss()
+  var n=(ls('zr_inv_num',0)+1);
+  ss('zr_inv_num',n);
+  return(G.settings.invoicePrefix||'ZR')+'-'+String(n).padStart(5,'0');
+}
 
 
 // ══════ TARJETA DE SELLOS ══════
@@ -670,39 +907,49 @@ function editItemPrice(key, newPrice) {
 function checkout(){
   const total=cartTotal(),sub=cartSub(),iva=cartIva(),cash=parseFloat(G.cashGiven||0);
   if(G.payMethod==='cash'&&cash<total)return;
-  const invNum=nextInvNum();
-  const tx={id:uid(),invNum,date:new Date().toISOString(),items:G.cart.map(i=>({...i})),subtotal:sub,ivaAmt:iva,total,method:G.payMethod,cashGiven:G.payMethod==='cash'?cash:total,change:G.payMethod==='cash'?Math.max(0,cash-total):0,customerId:(G.cartCustomer&&G.cartCustomer.id)||null,plate:G.cartPlate||(G.cartCustomer&&G.cartCustomer.plate)||'',month:mk()};
-  const inv={id:uid(),invNum,date:tx.date,customerId:tx.customerId,customerName:(G.cartCustomer&&G.cartCustomer.name)||'Cliente General',customerEmail:(G.cartCustomer&&G.cartCustomer.email)||'',plate:tx.plate,items:tx.items,subtotal:sub,ivaAmt:iva,total,method:tx.method,sent:false,month:tx.month};
-  G.transactions=[tx,...G.transactions];
-  G.invoices=[inv,...G.invoices];
-  // Descontar stock de productos vendidos
-  G.cart.filter(i=>i.type==='product').forEach(i=>logMovement(i.id,'out',i.qty,'Venta '+invNum,invNum));
-  // Actualizar cliente
-  if(G.cartCustomer){
-    // Check if cart has free wash (sello redemption)
-    var hasFreeSello = G.cart.some(function(i){ return i.isFree; });
-    G.customers=G.customers.map(function(c){
-      if(c.id!==G.cartCustomer.id) return c;
-      var newStamps = (c.stamps||0) + (hasFreeSello ? 0 : 1);
-      // Reset stamps when redeeming (consumed STAMPS_FOR_REWARD stamps)
-      if(hasFreeSello) newStamps = Math.max(0,(c.stamps||0) - STAMPS_FOR_REWARD);
-      return Object.assign({},c,{
-        totalSpent:(c.totalSpent||0)+total,
-        visitCount:(c.visitCount||0)+1,
-        lastVisit:new Date().toISOString(),
-        lastPlate:tx.plate||c.plate,
-        stamps:newStamps
+  if(!G.cart||!G.cart.length){showToast('⚠️ El carrito está vacío.');return;}
+  // Snapshot estado actual para rollback
+  var snapTx=[...G.transactions];
+  var snapInv=[...G.invoices];
+  var snapProds=G.products.map(function(p){return Object.assign({},p);});
+  var snapCusts=G.customers.map(function(c){return Object.assign({},c);});
+  var snapMovs=[...G.movements];
+  try{
+    const invNum=nextInvNum();
+    const tx={id:uid(),invNum,date:new Date().toISOString(),items:G.cart.map(function(i){return Object.assign({},i);}),subtotal:sub,ivaAmt:iva,total,method:G.payMethod,cashGiven:G.payMethod==='cash'?cash:total,change:G.payMethod==='cash'?Math.max(0,cash-total):0,customerId:(G.cartCustomer&&G.cartCustomer.id)||null,plate:G.cartPlate||(G.cartCustomer&&G.cartCustomer.plate)||'',month:mk()};
+    const inv={id:uid(),invNum,date:tx.date,customerId:tx.customerId,customerName:(G.cartCustomer&&G.cartCustomer.name)||'Cliente General',customerEmail:(G.cartCustomer&&G.cartCustomer.email)||'',plate:tx.plate,items:tx.items,subtotal:sub,ivaAmt:iva,total,method:tx.method,sent:false,month:tx.month};
+    G.transactions=[tx,...G.transactions];
+    G.invoices=[inv,...G.invoices];
+    G.cart.filter(function(i){return i.type==='product';}).forEach(function(i){logMovement(i.id,'out',i.qty,'Venta '+invNum,invNum);});
+    if(G.cartCustomer){
+      var hasFreeSello=G.cart.some(function(i){return i.isFree;});
+      G.customers=G.customers.map(function(c){
+        if(c.id!==G.cartCustomer.id) return c;
+        var newStamps=(c.stamps||0)+(hasFreeSello?0:1);
+        if(hasFreeSello)newStamps=Math.max(0,(c.stamps||0)-STAMPS_FOR_REWARD);
+        return Object.assign({},c,{totalSpent:(c.totalSpent||0)+total,visitCount:(c.visitCount||0)+1,lastVisit:new Date().toISOString(),lastPlate:tx.plate||c.plate,stamps:newStamps});
       });
-    });
-    save('custs');
+      save('custs');
+    }
+    save('transactions');save('invoices');saveMonthSnap();
+    if(G.driveToken&&G.driveToken.expires>Date.now()){driveUploadBackup(true);}
+    G.successTx={tx,inv};G.lastInvoice=inv;
+    G.payModal=false;G.cart=[];G.cashGiven='';G.cartCustomer=null;G.cartPlate='';
+    const low=getLowStock();
+    if(low.length)setTimeout(function(){showToast('⚠️ '+low.length+' producto(s) con stock bajo.');},1500);
+    render();
+  }catch(err){
+    // ROLLBACK: restaurar estado previo
+    G.transactions=snapTx;
+    G.invoices=snapInv;
+    G.products=snapProds;
+    G.customers=snapCusts;
+    G.movements=snapMovs;
+    save('transactions');save('invoices');save('prods');save('custs');save('movs');
+    showToast('❌ Error al procesar el cobro. Los datos fueron restaurados. Intente nuevamente.');
+    console.error('Checkout error:', err);
+    render();
   }
-  save('transactions');save('invoices');saveMonthSnap();
-  G.successTx={tx,inv};G.lastInvoice=inv;
-  G.payModal=false;G.cart=[];G.cashGiven='';G.cartCustomer=null;G.cartPlate='';
-  // Alerta stock bajo post-venta
-  const low=getLowStock();
-  if(low.length)setTimeout(()=>showToast(`⚠️ ${low.length} producto(s) con stock bajo. Revisar inventario.`),1500);
-  render();
 }
 
 // ── PIZARRA ──
@@ -797,6 +1044,19 @@ setInterval(function(){
     syncToSheets();
   }
 },10*60*1000);
+
+// ── CONSISTENCY CHECK cada 5 min ──
+// Valida integridad ANTES de escribir a IDB para no propagar corrupción
+setInterval(function(){
+  var validation=_validateIntegrity(null);
+  if(!validation.ok){
+    console.warn('Consistency check: integridad comprometida -',validation.issue);
+    // No sincronizar datos corruptos a IDB
+    return;
+  }
+  // RAM es válida — sincronizar a IDB
+  _syncRamToIdb();
+},5*60*1000);
 function doBackup(){
   const b=ls('zr_baks',[]);
   b.unshift({timestamp:new Date().toISOString(),transactions:G.transactions,expenses:G.expenses,customers:G.customers,invoices:G.invoices,services:G.services,products:G.products,movements:G.movements,purchases:G.purchases,settings:G.settings,users:G.users});
@@ -805,17 +1065,21 @@ function doBackup(){
 
 // ── GUARDADO DE EMERGENCIA al cerrar/recargar ──
 window.addEventListener('beforeunload',function(){
+  // En beforeunload IDB es async y puede no flushearse a tiempo.
+  // Escribimos a localStorage sincrónicamente como caché de emergencia.
+  // IDB ya tiene todo guardado de los saves anteriores.
+  function lsWrite(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
   try{
-    ss(K.tx,G.transactions);
-    ss(K.queue,G.queue);
-    ss(K.custs,G.customers);
-    ss(K.invs,G.invoices);
-    ss(K.exp,G.expenses);
-    ss(K.prods,G.products);
-    ss(K.movs,G.movements);
-    ss(K.purch,G.purchases);
-    ss(K.set,G.settings);
-    ss(K.qhist,G.queueHistory);
+    lsWrite(K.tx,G.transactions);
+    lsWrite(K.queue,G.queue);
+    lsWrite(K.custs,G.customers);
+    lsWrite(K.invs,G.invoices);
+    lsWrite(K.exp,G.expenses);
+    lsWrite(K.prods,G.products);
+    lsWrite(K.movs,G.movements);
+    lsWrite(K.purch,G.purchases);
+    lsWrite(K.set,G.settings);
+    lsWrite(K.qhist,G.queueHistory);
   }catch(e){}
 });
 
@@ -940,8 +1204,18 @@ function bindLogin(){
     if(G.loginPin.length>=4)return;
     G.loginPin+=k;render();
     if(G.loginPin.length===4){
-      if(G.loginPin===G.loginUser.pin){G.currentUser=G.loginUser;G.loginPin='';G.loginStep='select';G.view=RP[G.loginUser.role][0];render();}
-      else setTimeout(()=>{G.loginPin='';G.loginErr=true;render();},300);
+      if(G.loginPin===G.loginUser.pin){
+        // SOLO cambiar usuario — NUNCA tocar datos de negocio
+        G.currentUser=G.loginUser;
+        G.loginPin='';
+        G.loginStep='select';
+        // Ir a la primera vista permitida del rol
+        var firstView=RP[G.loginUser.role]?RP[G.loginUser.role][0]:'dashboard';
+        G.view=firstView;
+        render();
+      } else {
+        setTimeout(()=>{G.loginPin='';G.loginErr=true;render();},300);
+      }
     }
   });
   const b=document.getElementById('login-back');
@@ -1201,7 +1475,7 @@ function pgPOS(){
         <div style="display:flex;flex-direction:column;gap:6px;padding:2px 2px 6px">
           <select class="fi-sm" style="width:100%" id="cart-cust">
             <option value="">👤 Cliente sin registrar</option>
-            ${G.customers.map(c=>`<option value="${esc(c.id)}" ${(G.cartCustomer&&G.cartCustomer.id)===c.id?'selected':''}>${esc(c.name)}${c.plate?' — '+c.plate:''}</option>`).join('')}
+            ${G.customers.map(c=>`<option value="${esc(c.id)}" ${(G.cartCustomer&&G.cartCustomer.id)===c.id?'selected':''}>${esc(c.name)}${c.plate?' — '+esc(c.plate):''}</option>`).join('')}
           </select>
           <input class="fi-sm" id="cart-plate" placeholder="🏷️ Placa (ABC-123)" value="${esc(G.cartPlate)}" style="text-transform:uppercase">
         </div>
@@ -1471,7 +1745,7 @@ function pgQueue(){
     var pHTML='<div class="page">';
     pHTML+='<div class="ph"><h1>&#128663; Pizarra de Servicios</h1>';
     pHTML+='<div style="display:flex;gap:8px">';
-    pHTML+='<button class="btn cy" id="add-queue">+ Agregar</button>';
+    pHTML+='<button class="btn cy" id="add-queue">+ Agregar'+(G.queueDraft?'  &#128221;':'')+'</button>';
     pHTML+='<button class="btn" id="tab-hist" style="background:var(--sf2)">&#128203; Historial ('+G.queueHistory.length+')</button>';
     pHTML+='<button class="btn rd" id="reset-queue">&#128465; Resetear</button>';
     pHTML+='</div></div>';
@@ -1581,52 +1855,61 @@ function pgQueue(){
 }
 
 function renderQCard(q){
-  const st=VSTATUS[q.status];
-  const t=q.status==='proc'&&q.startedAt?new Date(q.startedAt).getTime():null;
-  const cu=G.customers.find(c=>c.id===q.customerId);
-  // ETA calculation
-  const estMins=getEstimatedMins(q.services||[]);
-  let etaHTML='';
-  if(t&&q.status==='proc'){
-    const elapsedMins=Math.floor((Date.now()-t)/60000);
-    if(estMins>0){
-      const pct=Math.min(100,Math.round(elapsedMins/estMins*100));
-      const remaining=estMins-elapsedMins;
-      const isOver=remaining<0;
-      const barColor=isOver?'var(--rd)':pct>75?'var(--yw)':'var(--cy)';
-      const etaClass=isOver?'over':pct>75?'warn':'ok';
-      const etaText=isOver
-        ?'🔴 Excedido por '+Math.abs(remaining)+'m'
-        :'⏱ '+remaining+'m restantes · '+pct+'%';
-      etaHTML=`<div class="q-progress-wrap" data-timer="${t}" data-est="${estMins}">
-        <div class="q-progress-bar" style="width:${pct}%;background:${barColor}"></div>
-      </div>
-      <div class="q-eta ${etaClass}" data-timer-eta="${t}" data-est="${estMins}">${etaText}</div>`;
-    }
+  var st=VSTATUS[q.status]||{label:'?',cls:'bmu',qcls:''};
+  var t=q.status==='proc'&&q.startedAt?new Date(q.startedAt).getTime():null;
+  var cu=G.customers.find(function(c){return c.id===q.customerId;});
+  var estMins=getEstimatedMins(q.services||[]);
+  var etaHTML='';
+  if(t&&q.status==='proc'&&estMins>0){
+    var elapsedMins=Math.floor((Date.now()-t)/60000);
+    var pct=Math.min(100,Math.round(elapsedMins/estMins*100));
+    var remaining=estMins-elapsedMins;
+    var isOver=remaining<0;
+    var barColor=isOver?'var(--rd)':pct>75?'var(--yw)':'var(--cy)';
+    var etaClass=isOver?'over':pct>75?'warn':'ok';
+    var etaText=isOver?('&#128308; Excedido por '+Math.abs(remaining)+'m'):('&#9201; '+remaining+'m restantes \xb7 '+pct+'%');
+    etaHTML='<div class="q-progress-wrap" data-timer="'+t+'" data-est="'+estMins+'">'
+      +'<div class="q-progress-bar" style="width:'+pct+'%;background:'+barColor+'"></div></div>'
+      +'<div class="q-eta '+etaClass+'" data-timer-eta="'+t+'" data-est="'+estMins+'">'+etaText+'</div>';
   } else if(estMins>0&&q.status==='wait'){
-    etaHTML=`<div style="font-size:11px;color:var(--mu);margin-top:4px">⏱ Est: ${estMins}m</div>`;
+    etaHTML='<div style="font-size:11px;color:var(--mu);margin-top:4px">&#9201; Est: '+estMins+'m</div>';
   }
-  return`<div class="qcard ${st.qcls}">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start">
-      <div>
-        ${q.plate?`<div class="q-plate">${esc(q.plate)}</div>`:`<div style="font-size:11px;color:var(--mu);margin-bottom:6px">Sin placa</div>`}
-        <div style="font-size:11px;color:var(--mu)">${VT[q.vehicleType]||q.vehicleType}</div>
-        ${q.customerName?`<div style="font-size:12px;font-weight:600;margin-top:3px">${esc(q.customerName)}</div>`:''}
-      </div>
-      ${t?`<div class="q-timer" style="color:var(--cy);font-family:'Orbitron',monospace;font-size:13px;font-weight:700" data-timer="${t}">0m</div>`:''}
-    </div>
-    ${q.services&&q.services.length?`<div style="margin-top:7px;font-size:11px;color:var(--mu)">${q.services.join(' · ')}</div>`:''}
-    ${etaHTML}
-    ${q.note?`<div style="margin-top:4px;font-size:11px;color:var(--tx2);font-style:italic">📝 ${esc(q.note)}</div>`:''}
-    <div class="q-actions">
-      <span class="bdg ${st.cls}">${st.label}</span>
-      ${q.status==='proc'?`<button class="icon-btn" title="Deshacer — volver a Esperando" data-undo="${q.id}" style="color:var(--yw);border-color:rgba(255,214,0,.3)">↩</button>`:''}
-      ${q.status==='done'?`<button class="icon-btn" title="Devolver a En Proceso" data-undodone="${q.id}" style="color:var(--cy);border-color:rgba(0,229,255,.3)">↩</button>`:''}
-      ${q.status!=='done'?`<button class="btn ${q.status==='wait'?'cy':'gn'}" style="padding:4px 9px;font-size:11px" data-adv="${q.id}">${q.status==='wait'?'▶ Iniciar':'✅ Listo'}</button>`:''}
-      ${q.status==='done'&&(cu&&cu.phone)?`<button class="wa-btn" onclick="openWA('¡Hola! Tu vehículo está listo en ${esc(G.settings.businessName)} 🌸','${esc(cu.phone)}')">📲 Avisar</button>`:''}
-      <button class="icon-btn" data-rmq="${q.id}" style="margin-left:auto">✕</button>
-    </div>
-  </div>`;
+
+  var html='<div class="qcard '+st.qcls+'">';
+  html+='<div style="display:flex;justify-content:space-between;align-items:flex-start">';
+  html+='<div>';
+  if(q.plate){
+    html+='<div class="q-plate">'+esc(q.plate)+'</div>';
+  } else {
+    html+='<div style="font-size:11px;color:var(--mu);margin-bottom:6px">Sin placa</div>';
+  }
+  html+='<div style="font-size:11px;color:var(--mu)">'+esc(VT[q.vehicleType]||q.vehicleType||'')+'</div>';
+  if(q.customerName)html+='<div style="font-size:12px;font-weight:600;margin-top:3px">'+esc(q.customerName)+'</div>';
+  html+='</div>';
+  if(t)html+='<div class="q-timer" style="color:var(--cy);font-family:\'Orbitron\',monospace;font-size:13px;font-weight:700" data-timer="'+t+'">0m</div>';
+  html+='</div>';
+  if(q.services&&q.services.length){
+    html+='<div style="margin-top:7px;font-size:11px;color:var(--mu)">'+q.services.map(esc).join(' \xb7 ')+'</div>';
+  }
+  html+=etaHTML;
+  if(q.note)html+='<div style="margin-top:4px;font-size:11px;color:var(--tx2);font-style:italic">&#128221; '+esc(q.note)+'</div>';
+  html+='<div class="q-actions">';
+  html+='<span class="bdg '+st.cls+'">'+st.label+'</span>';
+  if(q.status==='proc')html+='<button class="icon-btn" title="Volver a Esperando" data-undo="'+q.id+'" style="color:var(--yw);border-color:rgba(255,214,0,.3)">\u21a9</button>';
+  if(q.status==='done')html+='<button class="icon-btn" title="Devolver a En Proceso" data-undodone="'+q.id+'" style="color:var(--cy);border-color:rgba(0,229,255,.3)">\u21a9</button>';
+  if(q.status!=='done'){
+    var btnCls=q.status==='wait'?'cy':'gn';
+    var btnTxt=q.status==='wait'?'\u25b6 Iniciar':'\u2705 Listo';
+    html+='<button class="btn '+btnCls+'" style="padding:4px 9px;font-size:11px" data-adv="'+q.id+'">'+btnTxt+'</button>';
+  }
+  if(q.status==='done'&&cu&&cu.phone){
+    var bizName=esc(G.settings.businessName||'Zona Rosa');
+    var phone=esc(cu.phone);
+    html+='<button class="wa-btn" onclick="openWA(\'\\u00a1Hola! Tu veh\\u00edculo est\\u00e1 listo en '+bizName+' \\ud83c\\udf38\',\''+phone+'\')">&#128242; Avisar</button>';
+  }
+  html+='<button class="icon-btn" data-rmq="'+q.id+'" style="margin-left:auto">\u2715</button>';
+  html+='</div></div>';
+  return html;
 }
 
 function pgClients(){
@@ -2015,8 +2298,9 @@ function pgBackup(){
     +'<div class="scard">'
     +'<div class="stit">💻 Respaldo Local</div>'
     +'<div style="display:flex;flex-direction:column;gap:9px">'
-    +'<div class="bk-card"><div style="font-size:28px">⬇️</div><div style="flex:1"><div style="font-weight:600">Descargar respaldo completo</div><div style="font-size:12px;color:var(--mu)">Ventas, gastos, clientes, facturas, inventario</div></div><button class="btn gn" id="exp-bak">📥 Descargar</button></div>'
-    +'<div class="bk-card"><div style="font-size:28px">⬆️</div><div style="flex:1"><div style="font-weight:600">Restaurar desde archivo</div><div style="font-size:12px;color:var(--mu)">Cargar un .json de respaldo anterior</div></div><button class="btn rd" id="imp-bak">📤 Importar</button></div>'
+    +'<div class="bk-card"><div style="font-size:28px">&#11015;&#65039;</div><div style="flex:1"><div style="font-weight:600">Descargar respaldo completo</div><div style="font-size:12px;color:var(--mu)">Ventas, gastos, clientes, facturas, inventario</div></div><button class="btn gn" id="exp-bak">&#128229; Descargar</button></div>'
+    +'<div class="bk-card"><div style="font-size:28px">&#11014;&#65039;</div><div style="flex:1"><div style="font-weight:600">Restaurar desde archivo</div><div style="font-size:12px;color:var(--mu)">Cargar un .json de respaldo anterior</div></div><button class="btn rd" id="imp-bak">&#128228; Importar</button></div>'
+    +'<div class="bk-card"><div style="font-size:28px">&#128269;</div><div style="flex:1"><div style="font-weight:600">Verificar integridad de datos</div><div style="font-size:12px;color:var(--mu)">Detecta inconsistencias: stock negativo, montos erroneos, duplicados</div></div><button class="btn cy" id="check-integrity">&#128269; Verificar</button></div>'
     +'<div class="bk-card"><div style="font-size:28px">📊</div><div style="flex:1"><div style="font-weight:600">Exportar clientes CSV</div><div style="font-size:12px;color:var(--mu)">Para abrir en Excel o Google Sheets</div></div><button class="btn yw" id="exp-csv">📋 Exportar</button></div>'
     +'<div class="bk-card"><div style="font-size:28px">🤖</div><div style="flex:1"><div style="font-weight:600">Auto-respaldo local activo</div><div style="font-size:12px;color:var(--mu)">Cada 30 min.'+(G.lastBackup?' Último: '+G.lastBackup.toLocaleTimeString('es-CR'):'')+'</div></div><span class="bdg bok">✓ Activo</span></div>'
     +'</div></div>'
@@ -2067,7 +2351,19 @@ function pgSettings(){
   </div>`;
   return`<div class="page">
     <div class="ph"><h1>⚙️ Configuración</h1></div>
-    <div class="scard">
+    <div class="scard" style="border-color:rgba(255,165,0,.3);background:rgba(255,165,0,.04)">
+      <div class="stit" style="color:#f59f00">🛡️ Configuración de Brave — Importante para no perder datos</div>
+      <div style="font-size:13px;color:var(--mu);line-height:1.8;margin-bottom:12px">
+        Brave borra los datos del sitio al cerrar si no está bien configurado. Seguí estos pasos <strong style="color:#fff">una sola vez</strong>:
+      </div>
+      <ol style="font-size:13px;color:var(--mu);padding-left:18px;line-height:2">
+        <li>Abrí Brave → menú ☰ → <strong style="color:#fff">Configuración</strong></li>
+        <li>Ir a <strong style="color:#fff">Privacidad y seguridad</strong> → <strong style="color:#fff">Cookies y otros datos de sitios</strong></li>
+        <li>Desactivar <strong style="color:#f87171">"Borrar cookies y datos de sitios al cerrar todas las ventanas"</strong></li>
+        <li>En la misma página → <strong style="color:#fff">Sitios que pueden guardar datos</strong> → Agregar → pegar la URL del sistema</li>
+      </ol>
+      <div style="margin-top:10px;font-size:12px;color:#f59f00">⚡ Si ya perdiste datos: ir a 💾 Respaldos → Restaurar desde Google Drive</div>
+    </div>
       <div class="stit">Logo del Negocio</div>
       ${s.logo
         ?`<div style="display:flex;align-items:center;gap:14px">
@@ -2493,7 +2789,8 @@ function renderExpModal(){
 }
 
 function renderQueueModal(){
-  var pf=G.qPreFill||{};
+  // Restore from draft or prefill
+  var pf=G.queueDraft||G.qPreFill||{};
   var svcCats=[...new Set(G.services.filter(function(s){return s.active;}).map(function(s){return s.cat;}))];
   var svcHTML='';
   svcCats.forEach(function(cat){
@@ -2503,7 +2800,7 @@ function renderQueueModal(){
     svcHTML+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
     svcs.forEach(function(s){
       svcHTML+='<label style="display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--sf);cursor:pointer;font-size:13px">'
-        +'<input type="checkbox" class="qq-svc-cb" value="'+esc(s.name)+'" style="accent-color:var(--pk);width:14px;height:14px"> '
+        +'<input type="checkbox" class="qq-svc-cb" value="'+esc(s.name)+'"'+(pf.svcs&&pf.svcs.indexOf(s.name)>=0?' checked':'')+' style="accent-color:var(--pk);width:14px;height:14px"> '
         +esc(s.emoji)+' '+esc(s.name)+'</label>';
     });
     svcHTML+='</div></div>';
@@ -2511,7 +2808,7 @@ function renderQueueModal(){
 
   var custOpts='<option value="">Sin cliente registrado</option>';
   G.customers.forEach(function(c){
-    custOpts+='<option value="'+esc(c.id)+'"'+(pf.custId===c.id?' selected':'')+'>'+esc(c.name)+(c.plate?' \u2014 '+c.plate:'')+'</option>';
+    custOpts+='<option value="'+esc(c.id)+'"'+(pf.custId===c.id?' selected':'')+'>'+esc(c.name)+(c.plate?' \u2014 '+esc(c.plate):'')+'</option>';
   });
 
   var vtOpts='';
@@ -2519,7 +2816,7 @@ function renderQueueModal(){
     vtOpts+='<option value="'+kv[0]+'"'+((pf.vehicleType||'sedan')===kv[0]?' selected':'')+'>'+kv[1]+'</option>';
   });
 
-  var plateVal=(G.qPreFill&&G.qPreFill.plate)||'';
+  var plateVal=esc(pf.plate||'');
 
   var html='<div class="mo" id="modal-overlay">';
   html+='<div class="md" onclick="event.stopPropagation()" style="max-width:540px">';
@@ -2948,6 +3245,10 @@ function saveCust(){
   if(G.editItem)G.customers=G.customers.map(x=>x.id===c.id?c:x);
   else G.customers.push(c);
   save('custs');
+  // Respaldar a Drive cuando se guarda un cliente nuevo
+  if(!G.editItem&&G.driveToken&&G.driveToken.expires>Date.now()){
+    driveUploadBackup(true);
+  }
   if(G.pendingQueueAfterCust&&!G.editItem){
     G.pendingQueueAfterCust=false;
     closeModal();
@@ -2993,14 +3294,7 @@ function saveExp(){
 }
 
 function saveQueueItem(){
-  const plateInput=document.getElementById('qq-plate');
-  let plate=(plateInput&&plateInput.value||'').toUpperCase().trim();
-  if(!plate && G.qPreFill && G.qPreFill.plate){plate=G.qPreFill.plate;}
-  if(!plate){
-    const custIdTmp=(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null;
-    const cTmp=G.customers.find(c=>c.id===custIdTmp);
-    if(cTmp && cTmp.plate)plate=cTmp.plate;
-  }
+  const plate=((document.getElementById('qq-plate')&&document.getElementById('qq-plate').value)||'').toUpperCase().trim();
   const vt=(document.getElementById('qq-vt')&&document.getElementById('qq-vt').value)||'sedan';
   const custId=(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null;
   const cust=G.customers.find(c=>c.id===custId);
@@ -3011,6 +3305,8 @@ function saveQueueItem(){
   extra.split(',').map(s=>s.trim()).filter(Boolean).forEach(s=>svcs.push(s));
   const note=(document.getElementById('qq-note')&&document.getElementById('qq-note').value.trim())||'';
   addToQueue(plate,vt,(cust&&cust.name)||'',note,svcs,custId||null);
+  G.queueDraft=null; // Clear draft on successful save
+  G.qPreFill=null;
   closeModal();
 }
 // ══════════════════════════════════════════════════════
@@ -3502,7 +3798,16 @@ function startClock(){
 function bindMain(){
   // Navegación
   document.querySelectorAll('[data-nav]').forEach(el=>el.onclick=()=>{G.view=el.dataset.nav;G.search='';G.svcCat='all';render();});
-  document.getElementById('logout-btn')&&document.getElementById('logout-btn').addEventListener('click',()=>{G.currentUser=null;G.loginStep='select';render();});
+  document.getElementById('logout-btn')&&document.getElementById('logout-btn').addEventListener('click',function(){
+    // SOLO cambiar usuario — NUNCA tocar datos de negocio
+    G.currentUser=null;
+    G.loginStep='select';
+    G.loginPin='';
+    G.loginErr=false;
+    G.loginUser=null;
+    // NO resetear: queue, customers, transactions, products, invoices, etc.
+    render();
+  });
   document.getElementById('pwa-install-btn')&&document.getElementById('pwa-install-btn').addEventListener('click',function(){
     if(G.pwaPrompt){G.pwaPrompt.prompt();G.pwaPrompt.userChoice.then(function(){G.pwaPrompt=null;G.pwaInstallable=false;render();});}
   });
@@ -3541,7 +3846,7 @@ function bindMain(){
   document.querySelectorAll('[data-qp]').forEach(el=>el.onclick=()=>updateQty(el.dataset.qp,1));
   document.getElementById('clr-cart')&&document.getElementById('clr-cart').addEventListener('click',()=>{G.cart=[];render();});
   document.getElementById('pay-btn')&&document.getElementById('pay-btn').addEventListener('click',()=>{G.payModal=true;render();});
-  const ps=document.getElementById('pos-search');if(ps){ps.oninput=e=>{G.search=e.target.value;render();};}
+  // pos-search already bound via addEventListener above — no duplicate needed
   const cc=document.getElementById('cart-cust');if(cc){cc.onchange=e=>{G.cartCustomer=G.customers.find(c=>c.id===e.target.value)||null;render();};}
   const cp=document.getElementById('cart-plate');if(cp){cp.oninput=e=>{G.cartPlate=e.target.value.toUpperCase();};}
 
@@ -3611,6 +3916,25 @@ function bindMain(){
   document.querySelectorAll('[data-qht]').forEach(function(el){el.onclick=function(){G.qHistTab=el.dataset.qht;render();};});
   document.querySelectorAll('[data-rmq]').forEach(el=>el.onclick=e=>{e.stopPropagation();removeQueue(el.dataset.rmq);});
   document.getElementById('save-queue')&&document.getElementById('save-queue').addEventListener('click',saveQueueItem);
+  // Live draft save — guardar borrador mientras el usuario escribe en el modal de pizarra
+  function saveDraft(){
+    if(G.modal!=='queue')return;
+    var plate=(document.getElementById('qq-plate')&&document.getElementById('qq-plate').value)||'';
+    var note=(document.getElementById('qq-note')&&document.getElementById('qq-note').value)||'';
+    var vt=(document.getElementById('qq-vt')&&document.getElementById('qq-vt').value)||'sedan';
+    var custId=(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null;
+    var svcs=[];
+    document.querySelectorAll('.qq-svc-cb:checked').forEach(function(cb){svcs.push(cb.value);});
+    G.queueDraft={plate:plate,note:note,svcs:svcs,custId:custId,vt:vt};
+  }
+  ['qq-plate','qq-note','qq-vt','qq-cust'].forEach(function(id){
+    var el=document.getElementById(id);
+    if(el)el.addEventListener('change',saveDraft);
+    if(el&&id==='qq-plate')el.addEventListener('input',saveDraft);
+  });
+  document.querySelectorAll('.qq-svc-cb').forEach(function(cb){
+    cb.addEventListener('change',saveDraft);
+  });
 
   // Clientes
   document.getElementById('new-cust')&&document.getElementById('new-cust').addEventListener('click',()=>{G.modal='customer';G.editItem=null;G.fc={name:'',phone:'',email:'',plate:'',vehicleType:'sedan',notes:''};render();});
@@ -3677,6 +4001,7 @@ function bindMain(){
   // Backup
   document.getElementById('exp-bak')&&document.getElementById('exp-bak').addEventListener('click',exportBackup);
   document.getElementById('imp-bak')&&document.getElementById('imp-bak').addEventListener('click',()=>document.getElementById('bak-inp').click());
+  document.getElementById('check-integrity')&&document.getElementById('check-integrity').addEventListener('click',validateAndReport);
   document.getElementById('exp-csv')&&document.getElementById('exp-csv').addEventListener('click',exportClientsCSV);
   // Reset buttons
   document.getElementById('reset-inventory')&&document.getElementById('reset-inventory').addEventListener('click',function(){
@@ -3743,8 +4068,34 @@ function bindMain(){
   document.getElementById('suc-email')&&document.getElementById('suc-email').addEventListener('click',()=>{if(G.lastInvoice)sendInvoiceEmail(G.lastInvoice);G.successTx=null;render();});
 
   // Modal genérico
-  document.getElementById('modal-cancel')&&document.getElementById('modal-cancel').addEventListener('click',closeModal);
-  document.getElementById('modal-overlay')&&document.getElementById('modal-overlay').addEventListener('click',closeModal);
+  document.getElementById('modal-cancel')&&document.getElementById('modal-cancel').addEventListener('click',function(){
+    // If closing queue modal with data, confirm
+    if(G.modal==='queue'&&G.queueDraft&&(G.queueDraft.plate||G.queueDraft.svcs)){
+      showConfirm('⚠️','¿Cerrar sin guardar?','Tenés datos en el formulario de la pizarra. Si cerrás ahora se guardarán como borrador.','Cerrar y guardar borrador',function(){closeModal();});
+    } else {
+      G.queueDraft=null;
+      closeModal();
+    }
+  });
+  document.getElementById('modal-overlay')&&document.getElementById('modal-overlay').addEventListener('click',function(e){
+    // Only close if clicking directly on the overlay (not on modal content)
+    if(e.target!==document.getElementById('modal-overlay'))return;
+    // For queue modal: save draft and warn
+    if(G.modal==='queue'){
+      // Save whatever is in the form as draft before closing
+      var plate=(document.getElementById('qq-plate')&&document.getElementById('qq-plate').value)||'';
+      var note=(document.getElementById('qq-note')&&document.getElementById('qq-note').value)||'';
+      var svcs=[];
+      document.querySelectorAll('.qq-svc-cb:checked').forEach(function(cb){svcs.push(cb.value);});
+      if(plate||svcs.length||note){
+        G.queueDraft={plate:plate,note:note,svcs:svcs,custId:(document.getElementById('qq-cust')&&document.getElementById('qq-cust').value)||null,vt:(document.getElementById('qq-vt')&&document.getElementById('qq-vt').value)||'sedan'};
+        showToast('&#128221; Borrador guardado. Tocá "+ Agregar" para continuar.');
+        G.modal=null;render();
+        return;
+      }
+    }
+    closeModal();
+  });
 }
 
 // ── FILE INPUTS ──
@@ -3880,6 +4231,80 @@ render();
 // Relojes iniciados UNA SOLA VEZ — nunca dentro de render()
 startClock();
 startQueueTimer();
+
+// ══════════════════════════════════════════════════════
+//  ERROR BOUNDARY GLOBAL
+//  Captura errores JS no atrapados y los muestra al usuario
+//  en vez de fallar silenciosamente.
+// ══════════════════════════════════════════════════════
+window.addEventListener('error',function(e){
+  var msg=e.message||'Error desconocido';
+  var file=(e.filename||'').split('/').pop();
+  var line=e.lineno||'?';
+  // No mostrar errores de recursos externos (imágenes, etc.)
+  if(e.target&&e.target.tagName&&e.target.tagName!=='SCRIPT')return;
+  // Log silencioso para errores menores de IDB o red
+  if(msg.indexOf('ResizeObserver')>=0||msg.indexOf('Non-Error')>=0)return;
+  console.error('ERROR GLOBAL ['+file+':'+line+']:', msg, e.error);
+  // Mostrar toast solo para errores de lógica del sistema
+  if(msg&&msg.length<200){
+    showToast('\u274c Error del sistema: '+msg.substring(0,80)+(msg.length>80?'...':''));
+  }
+  // Intentar render de recuperación si el root está en blanco
+  try{
+    var root=document.getElementById('root');
+    if(root&&root.innerHTML.trim()===''){
+      setTimeout(function(){try{render();}catch(re){
+        root.innerHTML='<div style="padding:32px;text-align:center;color:#fff">'
+          +'<div style="font-size:48px;margin-bottom:16px">\u26a0\ufe0f</div>'
+          +'<div style="font-size:18px;margin-bottom:8px">Error al cargar el sistema</div>'
+          +'<div style="font-size:13px;color:#aaa;margin-bottom:20px">'+esc(msg.substring(0,120))+'</div>'
+          +'<button onclick="window.location.reload()" style="padding:10px 24px;background:#ff2d78;border:none;border-radius:8px;color:#fff;cursor:pointer;font-size:14px">Recargar</button>'
+          +'</div>';
+      }},100);
+    }
+  }catch(re2){}
+});
+
+window.addEventListener('unhandledrejection',function(e){
+  var msg=(e.reason&&e.reason.message)||String(e.reason)||'Promise rechazado';
+  if(msg.indexOf('IDB')>=0||msg.indexOf('indexedDB')>=0)return; // silenciar errores IDB normales
+  console.error('UNHANDLED PROMISE:', msg);
+});
+
+// ── DETECCIÓN DE PÉRDIDA DE DATOS AL ARRANCAR ──
+(function(){
+  var hasTx=G.transactions&&G.transactions.length>0;
+  var hasCusts=G.customers&&G.customers.length>0;
+  var hasInvs=G.invoices&&G.invoices.length>0;
+  var driveOk=G.driveToken&&G.driveToken.expires>Date.now();
+
+  // Si no hay ventas NI clientes NI facturas pero sí hay Drive → posible borrado por navegador
+  if(!hasTx&&!hasCusts&&!hasInvs&&driveOk){
+    setTimeout(function(){
+      showConfirm(
+        '⚠️','Datos no encontrados',
+        'No se encontraron ventas, clientes ni facturas. El navegador puede haber borrado los datos al cerrarse. ¿Restaurar desde el último respaldo de Google Drive?',
+        '☁️ Sí, restaurar desde Drive',
+        function(){driveRestorePickup();}
+      );
+    },1500);
+  }
+
+  // Respaldar a Drive automáticamente al abrir si hay datos
+  if((hasTx||hasCusts)&&driveOk){
+    setTimeout(function(){driveUploadBackup(true);},5000);
+  }
+
+  // Advertir sobre configuración de Brave si los datos parecen nuevos
+  var braveWarned=ls('zr_brave_warned',false);
+  if(!braveWarned&&navigator.brave&&hasCusts){
+    setTimeout(function(){
+      showToast('⚠️ Brave detectado: configurá "Privacidad" → desactivar "Borrar datos al salir" para no perder datos.');
+      ss('zr_brave_warned',true);
+    },3000);
+  }
+})();
 </script>
 </body>
 </html>
